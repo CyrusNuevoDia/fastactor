@@ -13,11 +13,23 @@ FastActor is an Elixir/OTP-inspired actor framework for Python, built on top of 
 
 ## Common commands
 
+Day-to-day, prefer the `just` recipes in `justfile`; they wrap `uv run` with the right defaults:
+
 - Install / sync deps: `uv sync`
-- Run the full test suite: `uv run pytest src`
+- Run the core suite (skips `src/tests/e2e/`): `just test` — or `uv run pytest src --ignore=src/tests/e2e`
+- Run tests matching a name: `just test gen_server` (joins args into a `-k` filter)
+- Run only the e2e suite: `just test e2e` (or `just test e2e chaos` to filter inside it)
 - Run a single test: `uv run pytest src/tests/test_gen_server.py::test_call_returns_echo_payload`
-- Run tests matching a name: `uv run pytest src -k genserver`
-- Tests are async; `src/tests/conftest.py` sets an autouse `anyio_backend` fixture that forces the `asyncio` backend, and each test module sets `pytestmark = pytest.mark.anyio`. When adding new test files, either add the same `pytestmark` or mark individual tests with `@pytest.mark.anyio`.
+- Stop on first failure and drop into `ipdb`: `just debug [name]`
+- Lint + type check: `just lint` (`ruff check src` + `ty check src`)
+- Format + fix: `just fmt` (`ruff format` + `ruff check --fix`)
+- `fastactor.otp.*` pre-imported REPL: `just repl`
+
+Tests are async. `src/tests/conftest.py` installs an autouse `anyio_backend` fixture that forces the `asyncio` backend and an autouse `_active_runtime` fixture that wraps every test in `async with Runtime()` (exposed as the `runtime` fixture); it also offers a `supervisor` fixture (`runtime.supervisor`) and a `make_supervisor` factory for isolated test supervisors. Each test module sets `pytestmark = pytest.mark.anyio`. When adding new test files, either add the same `pytestmark` or mark individual tests with `@pytest.mark.anyio`.
+
+Shared test doubles — `EchoServer`, `CounterServer`, `BoomServer`, `CrashyServer`, `SlowStopServer`, `MonitorServer`, `LinkServer`, `ContinueServer`, `OrderObserver`, and the `await_child_restart` helper — live in `src/tests/support.py`. Reuse these rather than re-rolling minimal `GenServer` subclasses in each test file. E2E helpers live separately in `src/tests/e2e/support.py`.
+
+`src/tests` is added to `sys.path` by `conftest.py`, so test files can `from support import ...` directly.
 
 ## Architecture
 
@@ -30,7 +42,7 @@ The design mirrors Erlang/OTP concepts layered on anyio primitives. Reading the 
 - **`DynamicSupervisor(Supervisor)`** (`dynamic_supervisor.py`) — `one_for_one`-only supervisor with `max_children` cap and `extra_arguments` prepended to each child's init args. Useful for pools of per-client workers.
 - **`Agent`, `Task`, `TaskSupervisor`** (`agent.py`, `task.py`) — higher-level shorthands. `Agent` wraps state behind `get`/`update`/`get_and_update`/`cast_update`. `Task` runs a one-shot async function with an awaitable result. `TaskSupervisor` extends `DynamicSupervisor` with a `run(fn, *args)` shortcut.
 - **`Registry`** (`registry.py`) — named process bag with `unique` or `duplicate` key modes. `Registry.register(name, key, proc)`, `Registry.lookup`, `Registry.dispatch`, `Registry.keys`. Auto-unregisters on process termination.
-- **`Runtime`** (`runtime.py`) — async context manager that owns the top-level `TaskGroup`, a single `RuntimeSupervisor` (with `trap_exits=True`), and the process registries (`processes` by id, plus `registry` / `_reverse_registry` for named lookup via `where_is`, and `registries` for `Registry`). `Runtime.current()` returns the active runtime via a class-level singleton guarded by `Runtime._lock`; only one Runtime may be active at a time. `Process.start` / `Process.start_link` go through `Runtime.current().spawn(...)`, which calls `process.loop` inside the runtime's task group and waits for `started()` before returning.
+- **`Runtime`** (`runtime.py`) — async context manager that owns the top-level `TaskGroup`, a single `RuntimeSupervisor` (with `trap_exits=True`), and the process registries (`processes` by id, plus `registry` / `_reverse_registry` for named lookup via `where_is`, and `registries` for `Registry`). `Runtime.current()` returns the active runtime via a class-level singleton guarded by `Runtime._lock`; only one Runtime may be active at a time. `Process.start` / `Process.start_link` go through `Runtime.current().spawn(...)`, which calls `process.loop` inside the runtime's task group and waits for `started()` before returning. There are three equivalent entry points: `async with Runtime(): ...` (tests, library code), `fastactor.run(main)` in `src/fastactor/__init__.py` (one-shot app entry — wraps `anyio.run` + context manager + clean-Ctrl-C), and `await Runtime.start()` / `await rt.stop()` (REPL/Jupyter). All three install `SIGINT`/`SIGTERM` traps by default (`trap_signals=False` to opt out).
 
 ### Important invariants to preserve when editing
 
