@@ -1,0 +1,1109 @@
+# fastactor
+
+> Elixir/OTP-style actors for Python, built on [anyio](https://anyio.readthedocs.io/). Processes with mailboxes, GenServers with `call`/`cast`, supervisors with `one_for_one` / `one_for_all` / `rest_for_one` restart strategies, `DynamicSupervisor`, `Registry` (unique / duplicate), `Agent`, awaitable `Task`, links, monitors, `trap_exits`, `handle_continue`, and named registration — all faithful to the OTP semantics you know from Elixir, translated to idiomatic Python with `async` / `await` and `anyio` task groups.
+
+This file is the canonical reference for agents writing code against `fastactor`. Every public class, method, message type, and exception is documented with exact signatures and behavior. If you need a concept-level tour, read the "Mental model" section first; if you know OTP and just need the Python API, jump straight to "API reference".
+
+---
+
+## Orientation
+
+- **Import root:** `from fastactor.otp import ...` re-exports the entire public surface.
+- **Runtime requirement:** every actor operation requires an active `Runtime` context (`async with Runtime(): ...`). Exactly one Runtime may be active per process.
+- **Concurrency model:** `anyio` structured concurrency. Every actor runs inside the Runtime's `TaskGroup`; cancellation and teardown are propagated structurally.
+- **Python:** 3.13+.
+- **Mailbox:** bounded anyio memory object stream, capacity from `settings.mailbox_size` (default 1024, env var `FASTACTOR_MAILBOX_SIZE`).
+
+---
+
+## Mental model — Elixir ↔ Python
+
+Both columns show the **call you actually write** — your subclass / module on the user-code rows, the framework name on the framework rows.
+
+| Elixir / OTP                                            | fastactor                                                 | Notes                                                                                        |
+| ------------------------------------------------------- | --------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `MyWorker.start_link(arg)`                              | `await MyWorker.start_link(arg)`                          | Always `await`. `start_link` is inherited — you call it on your subclass.                    |
+| `GenServer.call(pid, :req)`                             | `await worker.call(request, timeout=5)`                   | Raises on timeout or on callback exception.                                                  |
+| `GenServer.cast(pid, :req)`                             | `worker.cast(request)`                                    | Fire-and-forget, synchronous call (not awaitable).                                           |
+| `handle_call({:foo, bar}, _from, state)`                | `handle_call(self, call: Call)` — match `call.message`    | Bare return value becomes the reply; return `None` to defer (see below).                     |
+| `{:noreply, state}` / `GenServer.reply(from, v)`        | `return None`, then later `call.set_result(v)`            | No sentinel class — `None` return means "don't reply yet"; caller stashes `call` and replies later. |
+| `{:stop, reason, reply, state}`                         | `return (reply, Stop(reason))`                            | Caller gets `reply`, then the server stops with `reason`. Symmetric with `(reply, Continue(term))`. |
+| `{:noreply, state, {:continue, arg}}`                   | `return Continue("arg")`                                  | `handle_continue` runs next, before the next mailbox read.                                   |
+| `{:via, Registry, {R, key}}`                            | `await Worker.start(via=("R", key))`                      | Mutually exclusive with `name=`. Also returns by `whereis(("R", key))`.                      |
+| `Process.link(pid)` / `Process.monitor(pid)`            | `proc.link(other)` / `proc.monitor(other)`                | Bidirectional link; unidirectional monitor emits `Down` when the target terminates.          |
+| `Process.flag(:trap_exit, true)`                        | `await MyWorker.start_link(trap_exits=True)`              | Convert link cascades to `handle_exit(message: Exit)` callbacks.                             |
+| `Supervisor.start_link(..., strategy: :one_for_one)`    | `await Supervisor.start(strategy="one_for_one")`          | Plus `one_for_all` and `rest_for_one`.                                                       |
+| `DynamicSupervisor.start_child(sup, spec)`              | `await dsup.start_child(spec)`                            | Always `one_for_one`; supports `max_children` and `extra_arguments`.                         |
+| `Registry.start_link(keys: :unique, name: R)`           | `await Registry.new("R", mode="unique")`                  | Two modes: `unique` (1 pid per key) and `duplicate` (pub/sub fan-out).                       |
+| `Agent.start_link(fn -> 0 end)`                         | `await Agent.start(lambda: 0)`                            | Tiny state-holder over `GenServer`.                                                          |
+| `Task.async(fn)` / `Task.async_nolink(fn)`              | `await Task.start_link(fn)` / `await Task.start(fn)`      | `start_link` cascades a crash to caller; `start` does not. Consume with `result = await t`.  |
+
+The names match where the Python idiom allows; divergences are intentional and annotated here so you don't guess.
+
+---
+
+## Installation
+
+Requires Python 3.13+. This repo uses [uv](https://docs.astral.sh/uv/) and [mise](https://mise.jdx.dev/):
+
+```bash
+uv sync
+uv run pytest src
+```
+
+There is no PyPI release yet — install from source:
+
+```bash
+uv add "fastactor @ git+https://github.com/CyrusNuevoDia/fastactor"
+```
+
+---
+
+## The Runtime
+
+Everything runs inside an active `Runtime`. It owns the anyio task group, the top-level `RuntimeSupervisor`, and the registries.
+
+```python
+from fastactor.otp import Runtime
+
+async def main():
+    async with Runtime() as rt:
+        # all actor work happens here
+        ...
+```
+
+Inside any actor (or coroutine running inside the runtime), reach it with `Runtime.current()`. Only one Runtime may be active at a time — a second `async with Runtime():` raises `RuntimeError("Runtime already started")`.
+
+### Runtime API
+
+```python
+class Runtime:
+    supervisor: RuntimeSupervisor | None       # top-level supervisor with trap_exits=True
+    registry: dict[str, str]                   # name → proc.id (named-process lookup)
+    processes: dict[str, Process]              # proc.id → Process
+    registries: dict[str, _RegistryEntry]      # user-facing Registry storage
+
+    @classmethod
+    def current(cls) -> "Runtime": ...         # raises RuntimeError if none active
+
+    async def spawn[P: Process](
+        self, process: P, *args, name: str | None = None, **kwargs
+    ) -> P: ...
+
+    def register_name(self, name: str, proc: Process): ...
+    def unregister_name(self, name: str): ...
+    def where_is(self, name: str) -> Process | None: ...                     # sync, str-only shim
+    async def whereis(
+        self, name_or_via: str | tuple[str, Any]
+    ) -> Process | None: ...                                                  # async, accepts name or (registry, key)
+```
+
+`spawn` accepts either `name=` (global name) or `via=(registry, key)` (registers into a `Registry` entry), not both. You rarely call `spawn` directly — `Process.start` / `Process.start_link` do it for you. `register_name` / `where_is` back the legacy named-registration feature; prefer `whereis(...)` in new code — it's the canonical async lookup and handles both string names and `(registry, key)` tuples.
+
+There's also a package-level free function:
+
+```python
+from fastactor.otp import whereis
+
+proc = await whereis("my_singleton")
+proc = await whereis(("sessions", user_id))
+```
+
+### Entry points
+
+Three equivalent ways to bring up a Runtime. All install `SIGINT` / `SIGTERM` traps by default (opt out via `trap_signals=False`); receiving a signal cancels the runtime's task group and triggers `__aexit__` cleanup inside the live loop.
+
+```python
+# 1. Context manager — primary. Best for tests, library code, anywhere inside an existing async scope.
+async def main():
+    async with Runtime():
+        counter = await Counter.start()
+        ...
+anyio.run(main)
+
+# 2. fastactor.run(main) — one-line app entry point. Wraps anyio.run + Runtime + clean-Ctrl-C handling.
+import fastactor
+fastactor.run(main)                     # returns main's return value
+fastactor.run(main, trap_signals=False) # opt out of signal handling
+
+# 3. Runtime.start() / Runtime.stop() — explicit pair. Best for REPLs/Jupyter where `async with` is awkward.
+rt = await Runtime.start()              # enters the runtime; returns it
+counter = await Counter.start()
+await rt.stop()                         # equivalent to leaving `async with`
+```
+
+`Runtime.start()` enforces the singleton the same way the context manager does — a second `start()` raises `RuntimeError("Runtime already started")`. `Runtime.stop()` is idempotent after the first call clears the singleton.
+
+### `fastactor.run()` signature
+
+```python
+def run(
+    main_fn: Callable[[], Awaitable[Any]],
+    *,
+    trap_signals: bool = True,
+    backend: str = "asyncio",
+) -> Any
+```
+
+When `trap_signals=True` (default), a signal-triggered `CancelledError` (bubbling up from `main_fn` because the runtime's task group got cancelled) is silently absorbed — `run()` returns `None`. Normal exceptions still propagate unchanged. `BaseExceptionGroup` with a single inner exception is automatically unwrapped inside `Runtime.__aexit__` so callers see the original error, not anyio's group wrapper.
+
+### Why there is no "auto-cleanup on process exit"
+
+Python's `atexit` hooks run synchronously after the event loop has already closed. There's no reliable way to schedule `await rt.__aexit__()` from a sync finalizer. Signal handlers give the same effective guarantee within the live loop: `SIGINT`/`SIGTERM` arrive → task group cancels → `__aexit__` cleans up → process exits. That's why `trap_signals=True` is the default.
+
+---
+
+## Process — the base actor
+
+`Process` is the abstract base. It has a bounded mailbox, a `_started` / `_stopped` pair of events, `links` / `monitors` / `monitored_by` sets, and a lifecycle driven by `loop()`. Subclass it and override the callbacks you need.
+
+### Callbacks (override these)
+
+```python
+async def init(self, *args, **kwargs) -> Ignore | Stop | Continue | None:
+    """Runs once before the mailbox loop. Return value controls what happens next."""
+    return None
+
+async def handle_info(self, message: Any) -> Continue | None:
+    """Called for every non-standard message (anything not Stop/Exit/Call/Cast)."""
+
+async def handle_exit(self, message: Exit):
+    """Only called when trap_exits=True and a linked process exits."""
+
+async def handle_continue(self, term: Any):
+    """Runs next after a callback returns Continue(term)."""
+
+async def on_terminate(self, reason: Any):
+    """User cleanup hook. Runs BEFORE monitors/links are notified, so observers see the
+    post-cleanup state. Exceptions here are logged but do NOT block the Down/Exit fanout.
+    Prefer this over overriding `terminate`."""
+
+async def terminate(self, reason: Any):
+    """Machinery teardown — calls `on_terminate`, notifies monitors/links, unregisters.
+    You almost never override this; override `on_terminate` instead."""
+```
+
+### Starting, stopping, sending
+
+```python
+# Factory methods (classmethods)
+await Worker.start(*args, trap_exits=False, supervisor=None, name=None, via=None, **kwargs)
+await Worker.start_link(*args, trap_exits=False, supervisor=None, name=None, via=None, **kwargs)
+# `name=` registers under the runtime's global name map; `via=(registry, key)` registers
+# into a user-created Registry. They are mutually exclusive.
+
+# Instance methods
+await proc.send(msg)                # async send; waits if mailbox is full
+proc.send_nowait(msg)               # raises if full
+await proc.stop(reason="normal", timeout=60, sender=None)
+await proc.kill()                   # closes the mailbox, unwinds immediately
+proc.info(msg, sender=None)         # wraps in Info(sender, msg) and send_nowait
+
+# Lifecycle observation
+proc.has_started() -> bool
+await proc.started() -> Self        # waits until init completes
+proc.has_stopped() -> bool
+await proc.stopped() -> Self        # waits until terminate completes
+```
+
+### Init return sentinels
+
+`init` can return any of:
+
+| Return                 | Effect                                                                        |
+| ---------------------- | ----------------------------------------------------------------------------- |
+| `None`                 | Normal start, enter mailbox loop.                                             |
+| `Ignore()`             | Skip the loop, never run; `_started` and `_stopped` both set.                 |
+| `Stop(reason=...)`     | Refuse to start; emits `Shutdown(reason)`; crashes if reason is abnormal.     |
+| `Continue(term)`       | Start normally, but run `handle_continue(term)` before the first mailbox read. |
+
+### Minimal Process example
+
+```python
+from fastactor.otp import Process, Runtime
+
+class Worker(Process):
+    async def init(self, *, name: str):
+        self.name = name
+
+    async def handle_info(self, message):
+        print(self.name, "got", message)
+
+async def main():
+    async with Runtime():
+        p = await Worker.start(name="alice")
+        await p.send("hello")
+        await p.stop("normal")
+```
+
+### Equality and identity
+
+`Process.__hash__` and `__eq__` are by `id` (a ksuid string from `utils.id_generator`). Two `Process` instances with the same id compare equal — this is what makes `links`/`monitors` sets work.
+
+---
+
+## GenServer — synchronous call + async cast
+
+`GenServer` inherits from `Process` and adds `call` (synchronous, awaits a reply) and `cast` (fire-and-forget).
+
+### Callbacks
+
+```python
+async def handle_call(
+    self, call: Call,
+) -> Any | None | tuple[Any, Continue] | tuple[Any, Stop]:
+    # Return contract — picked one of these:
+    #   None                         → NoReply; caller stays blocked. Stash `call` and later
+    #                                  invoke `call.set_result(value)` to resolve the reply.
+    #   value                        → Reply with `value`.
+    #   (value, Continue(term))      → Reply with `value`, then run handle_continue(term).
+    #   (value, Stop(reason))        → Reply with `value`, then stop with `reason`.
+    #   raise                        → Exception propagates to caller AND crashes the server.
+    return call.message
+
+async def handle_cast(self, cast: Cast) -> Continue | None:
+    # no reply; optionally return Continue(term) to schedule handle_continue
+    ...
+
+async def handle_info(self, message) -> Continue | None: ...
+```
+
+### Client API
+
+```python
+await server.call(request, sender: Process | None = None, timeout=5) -> Any
+server.cast(request, sender: Process | None = None)           # sync call, not awaitable
+```
+
+`sender` defaults to the current process (via `_current_process` ContextVar) or the supervisor; you rarely set it manually. `call` raises `TimeoutError` on timeout and re-raises any exception thrown inside `handle_call`.
+
+### Deferred reply — `handle_call` returning `None`
+
+Returning `None` from `handle_call` means "don't reply yet". Stash the `Call` object, finish your callback, and later — from `handle_info`, `handle_continue`, or another `handle_call` — call `saved_call.set_result(value)` to unblock the waiting caller. This is the fastactor equivalent of Elixir's `{:noreply, state}` + `GenServer.reply(from, v)`.
+
+```python
+class Deferred(GenServer):
+    async def init(self):
+        self.pending: Call | None = None
+
+    async def handle_call(self, call: Call):
+        if call.message == "wait":
+            self.pending = call
+            return None                    # NoReply — caller stays blocked on `await server.call("wait")`
+        if call.message == "release":
+            if self.pending is not None:
+                self.pending.set_result("done")   # resolves the earlier blocked call
+                self.pending = None
+            return "ok"
+```
+
+Because `None` is the sentinel, if you ever need to reply with the literal value `None`, use the tuple form `return (None, Continue("done"))` or resolve via `call.set_result(None)` explicitly.
+
+### Call and Cast message wrappers
+
+IMPORTANT: the callbacks receive wrapped messages. Unpack with `.message`:
+
+```python
+async def handle_call(self, call: Call):
+    match call.message:
+        case ("get", key):      return self.store[key]
+        case ("put", key, val): self.store[key] = val; return "ok"
+```
+
+This wrapper convention is deliberate and stable. Do NOT write `async def handle_call(self, request, from_, state):` — that's Elixir, not fastactor.
+
+### If handle_call raises
+
+The exception is both delivered to the caller (re-raised from `await server.call(...)`) AND re-raised inside the server process, which then crashes. This mirrors Elixir's `GenServer` semantics — a buggy `handle_call` shouldn't just lie to the caller.
+
+### Full Counter example
+
+```python
+from fastactor.otp import GenServer, Runtime, Call, Cast
+
+class Counter(GenServer):
+    count: int
+
+    async def init(self, start: int = 0):
+        self.count = start
+
+    async def handle_call(self, call: Call):
+        return self.count
+
+    async def handle_cast(self, cast: Cast):
+        match cast.message:
+            case ("add", n): self.count += n
+            case ("reset",): self.count = 0
+
+async def main():
+    async with Runtime():
+        counter = await Counter.start(start=10)
+        counter.cast(("add", 5))
+        counter.cast(("add", 2))
+        assert await counter.call(None) == 17       # mailbox is FIFO, casts have been processed
+        await counter.stop()
+```
+
+Notice that a subsequent `call` round-trip guarantees prior casts have been processed. This is the **standard deterministic-sync pattern** in fastactor — use it instead of `asyncio.sleep` in tests.
+
+---
+
+## Links, monitors, trap_exits
+
+Two process relationships, both OTP-identical:
+
+- **Link** — bidirectional. If either side exits abnormally, the other is stopped with the same reason. If a linked process has `trap_exits=True`, it instead receives `Exit(sender, reason)` via `handle_exit`.
+- **Monitor** — one-way. When the monitored process terminates (for any reason), the monitor receives `Down(sender, reason)` via `handle_info` and keeps running.
+
+```python
+from fastactor.otp import Down, GenServer, Runtime
+
+class Watcher(GenServer):
+    async def init(self):
+        self.downs: list[Down] = []
+
+    async def handle_info(self, msg):
+        if isinstance(msg, Down):
+            self.downs.append(msg)
+
+async def main():
+    async with Runtime():
+        watcher = await Watcher.start()
+        target  = await GenServer.start()
+        watcher.monitor(target)
+
+        await target.stop("normal")
+        await target.stopped()              # Down now in watcher's mailbox
+        # ... watcher.downs has one Down(target, "normal")
+```
+
+### What counts as a "normal" exit
+
+Only these reasons are treated as normal (do not cascade across links, do not trigger `transient` restarts):
+
+- `"normal"`
+- `"shutdown"`
+- an instance of `Shutdown(...)`
+
+Everything else is a crash and propagates.
+
+### Link / monitor operations
+
+```python
+proc.link(other)
+proc.unlink(other)
+proc.monitor(other)
+proc.demonitor(other)
+```
+
+All are synchronous; they mutate the local sets on both processes.
+
+---
+
+## Supervisor — restart strategies and child specs
+
+A `Supervisor` runs children according to a restart policy. Build child specs with `Supervisor.child_spec(...)` and start them with `start_child(spec)`.
+
+### Strategies
+
+| `strategy`     | On child exit                                                                                   |
+| -------------- | ----------------------------------------------------------------------------------------------- |
+| `one_for_one`  | Restart just the failing child.                                                                 |
+| `one_for_all`  | Terminate all siblings (in reverse spec order) and restart them in forward order.               |
+| `rest_for_one` | Restart the failing child plus every child started after it; earlier siblings keep running.    |
+
+### Restart types (per child)
+
+| `restart`   | Normal exit   | Crash        |
+| ----------- | ------------- | ------------ |
+| `permanent` | restart       | restart      |
+| `transient` | don't restart | restart      |
+| `temporary` | don't restart | don't restart |
+
+### Shutdown types (per child)
+
+| `shutdown`       | Behavior                                                                          |
+| ---------------- | --------------------------------------------------------------------------------- |
+| `int` (seconds)  | `proc.stop(reason, timeout=shutdown)`; kill on timeout.                           |
+| `"infinity"`     | `proc.stop(reason, timeout=None)`. Wait forever.                                  |
+| `"brutal_kill"`  | `proc.kill()` immediately — closes the mailbox, no terminate callback completes.  |
+
+### Restart intensity
+
+`max_restarts` (default 3) / `max_seconds` (default 5.0) cap how often the supervisor will restart. Exceeding the cap crashes the supervisor itself with `Failed("Max restart intensity reached")`, which then propagates to its own supervisor.
+
+### API
+
+```python
+# Construction
+spec = Supervisor.child_spec(
+    child_id: str,           # unique within this supervisor; required
+    func_or_class,           # class with start_link (preferred) or async callable
+    args: tuple | None = None,
+    kwargs: dict | None = None,
+    restart: RestartType = "permanent",
+    shutdown: ShutdownType = 5,
+    type: Literal["worker", "supervisor"] = "worker",
+    modules: list | None = None,
+    significant: bool = False,
+) -> ChildSpec
+
+sup = await Supervisor.start(
+    strategy="one_for_one",  # or "one_for_all" / "rest_for_one"
+    max_restarts=3,
+    max_seconds=5,
+    children=[spec_or_tuple, ...],   # optional; seeds before the strategy loop starts
+)
+
+# Management (mirrors Elixir)
+proc   = await sup.start_child(spec_or_tuple)     # ChildSpec OR (cls, kwargs_dict) tuple
+await sup.terminate_child(child_id)
+sup.delete_child(child_id)                # spec must have been terminated first
+proc   = await sup.restart_child(child_id) # for stopped children
+infos  = sup.which_children()              # list of dicts with id/process/restart/shutdown/type/significant
+counts = sup.count_children()              # {"specs": n, "active": n, "workers": n, "supervisors": n}
+```
+
+### Tuple-form child specs
+
+Both `Supervisor` and `DynamicSupervisor` accept a 2-tuple `(cls, kwargs_dict)` anywhere a `ChildSpec` is expected — `start_child`, `children=` seeding, and the `_normalize_child_spec` helper. The child id defaults to `cls.__name__`; collisions are still rejected.
+
+```python
+# All three forms are equivalent for typical workers:
+await sup.start_child(Supervisor.child_spec("counter", Counter, kwargs={"start": 0}))
+await sup.start_child((Counter, {"start": 0}))                              # id = "Counter"
+sup = await Supervisor.start(children=[(Counter, {"start": 0}), DbConnSpec])
+```
+
+### The root supervisor
+
+`Runtime.supervisor` is a pre-installed `RuntimeSupervisor` (with `trap_exits=True`). When you call `Worker.start_link()` without an explicit `supervisor=`, the link is made to the root. For real applications, start your own `Supervisor` as a child of the root and hang your worker tree off that.
+
+### Example
+
+```python
+from fastactor.otp import Runtime, Supervisor
+
+async with Runtime() as rt:
+    sup = rt.supervisor
+    spec = sup.child_spec(
+        "counter",
+        Counter,
+        kwargs={"start": 0},
+        restart="transient",
+        shutdown=5,
+    )
+    counter = await sup.start_child(spec)
+```
+
+---
+
+## DynamicSupervisor — runtime-added children
+
+Children aren't declared up front; they're added one-at-a-time. Strategy is always `one_for_one`.
+
+### API
+
+```python
+pool = await DynamicSupervisor.start(
+    max_children: int | float = float("inf"),
+    extra_arguments: tuple = (),     # prepended to every child's start tuple
+)
+
+# Dynamic children default to restart="temporary"
+spec = DynamicSupervisor.child_spec(
+    None,                    # pass None to auto-generate a "dyn:..." id
+    Worker,
+    kwargs={"name": "alice"},
+    restart="temporary",     # default
+)
+worker = await pool.start_child(spec)
+```
+
+Differences from `Supervisor`:
+
+- `child_id` can be `None` → auto-generated `"dyn:<ksuid>"`.
+- Default `restart` is `"temporary"` instead of `"permanent"`.
+- Passing `strategy != "one_for_one"` in `init` raises `ValueError` — will surface as the original exception from `start()`.
+
+### Example
+
+```python
+from fastactor.otp import DynamicSupervisor, Runtime
+
+async with Runtime():
+    pool = await DynamicSupervisor.start(max_children=10)
+    for i in range(3):
+        spec = pool.child_spec(None, Worker, kwargs={"name": f"w{i}"})
+        await pool.start_child(spec)
+```
+
+---
+
+## Registry — name-keyed process lookup
+
+A `Registry` is a keyed map from arbitrary keys to processes. Distinct from `Runtime.register_name`, which is for a single *global* name per process.
+
+Two modes:
+
+- `unique` — one process per key. Re-registering raises `AlreadyRegistered(pid)`.
+- `duplicate` — many processes per key. Useful for pub/sub fan-out.
+
+Entries auto-scrub when a process terminates (hooked into `Runtime.unregister(proc)` via `_proc_keys`).
+
+### API (all classmethods, all async)
+
+```python
+await Registry.new(name: str, mode: Literal["unique", "duplicate"]) -> None
+await Registry.register(name, key, proc: Process) -> None        # raises AlreadyRegistered for unique collisions
+await Registry.unregister(name, key, proc: Process) -> None
+await Registry.lookup(name, key) -> list[Process]                # always a list; len <= 1 for unique
+await Registry.dispatch(name, key, fn: Callable[[Process], Awaitable[None]]) -> None
+await Registry.keys(name: str, proc: Process) -> list
+```
+
+`dispatch` snapshots the pid set under the registry lock, releases the lock, and then awaits `fn(proc)` for each. Exceptions in `fn` are logged and swallowed so one slow/broken subscriber can't break the fan-out.
+
+### Example — pub/sub fan-out
+
+```python
+from fastactor.otp import Registry, Runtime
+
+async with Runtime():
+    await Registry.new("events", mode="duplicate")
+    sub1 = await Subscriber.start(); await Registry.register("events", "news", sub1)
+    sub2 = await Subscriber.start(); await Registry.register("events", "news", sub2)
+
+    async def notify(proc):
+        await proc.send(Info(None, "breaking news"))
+    await Registry.dispatch("events", "news", notify)
+
+    procs = await Registry.lookup("events", "news")  # [sub1, sub2] (order not stable)
+```
+
+---
+
+## Agent — tiny state-holder
+
+A thin wrapper over `GenServer` for "I just need to hold some state". Callbacks run inside the agent process; state is whatever the factory returns.
+
+### API
+
+```python
+counter = await Agent.start(factory: Callable[[], S | Awaitable[S]])
+
+await agent.get(fn: Callable[[S], R | Awaitable[R]], timeout=5) -> R
+await agent.update(fn: Callable[[S], S | Awaitable[S]], timeout=5) -> None
+await agent.get_and_update(fn: Callable[[S], tuple[R, S] | Awaitable[tuple[R, S]]], timeout=5) -> R
+agent.cast_update(fn)                      # fire-and-forget state update
+```
+
+Functions may be sync or async — `_maybe_await` handles both.
+
+### Example
+
+```python
+from fastactor.otp import Agent, Runtime
+
+async with Runtime():
+    counter = await Agent.start(lambda: 0)
+    await counter.update(lambda n: n + 1)
+    await counter.update(lambda n: n + 1)
+    assert await counter.get(lambda n: n) == 2
+    assert await counter.get_and_update(lambda n: (n, n * 10)) == 2
+    assert await counter.get(lambda n: n) == 20
+```
+
+---
+
+## Task — one-shot awaitable coroutines
+
+A `Task` is a `Process` that runs a single coroutine once, captures the result (or exception), and exposes it through `__await__`. It has two flavors — exactly the equivalent of Elixir's `Task.async_nolink` vs `Task.async`:
+
+| Factory                       | Link?   | Elixir analogue          | Failure behavior                                    |
+| ----------------------------- | ------- | ------------------------ | --------------------------------------------------- |
+| `Task.start(fn, ...)`         | No      | `Task.async_nolink`      | Caller survives a task crash; inspect via `await t`. |
+| `Task.start_link(fn, ...)`    | Yes     | `Task.async`             | A task crash cascades to the caller via link.       |
+
+### Consumption — `await task`
+
+```python
+task = await Task.start(compute)    # returns immediately — task runs in background
+result = await task                 # blocks until done, raises if task raised
+```
+
+Timeouts are the caller's responsibility — wrap the await:
+
+```python
+from anyio import fail_after
+
+with fail_after(5):
+    result = await task
+```
+
+### Task post-start operations
+
+```python
+# Tri-state poll — does NOT raise on crash:
+#   returns the result on success,
+#   returns the Exception object on crash,
+#   returns None on timeout.
+result = await task.yield_(timeout=1)
+
+# Graceful stop; falls back to kill() if the task doesn't stop within `timeout`.
+await task.shutdown(timeout=5)
+```
+
+### TaskSupervisor — pool of tasks
+
+```python
+tsup = await TaskSupervisor.start()
+task = await tsup.async_(compute, arg1, arg2, kwarg=value)   # primary name
+task = await tsup.run(compute, arg1, arg2, kwarg=value)      # backward-compat alias
+result = await task
+```
+
+`TaskSupervisor` is a `DynamicSupervisor` under the hood. `async_` is the idiomatic name (Elixir calls it `Task.Supervisor.async/2`); the trailing underscore is only because `async` is a Python keyword. `run` is preserved as an alias.
+
+### Example — fan-out parallelism
+
+```python
+from fastactor.otp import Task, Runtime
+from anyio import fail_after
+
+async def fetch(url): ...
+
+async with Runtime():
+    tasks = [await Task.start(fetch, url) for url in urls]
+    with fail_after(10):
+        results = [await t for t in tasks]
+```
+
+---
+
+## handle_continue — post-callback continuations
+
+Elixir-style `{:continue, term}`. Schedule a follow-up callback without re-entering the mailbox loop. Useful for deferred init, cleanup after a call, or chaining long work.
+
+### Mechanics
+
+- `init` may return `Continue(term)` → `handle_continue(term)` runs before the first mailbox read.
+- `handle_call` may return `(reply, Continue(term))` → caller gets `reply`, then `handle_continue(term)` runs before the next message.
+- `handle_cast` / `handle_info` may return `Continue(term)` → `handle_continue(term)` runs next.
+
+### Example — deferred init
+
+```python
+from fastactor.otp import GenServer, Continue
+
+class Bootstrap(GenServer):
+    async def init(self, db_url):
+        self.db_url = db_url
+        return Continue("load")             # init returns immediately; load happens next
+
+    async def handle_continue(self, term):
+        if term == "load":
+            self.conn = await connect(self.db_url)
+```
+
+### Example — call with follow-up
+
+```python
+class Server(GenServer):
+    async def handle_call(self, call: Call):
+        reply = self._compute(call.message)
+        return (reply, Continue(("log", reply)))   # reply delivered, then handle_continue
+
+    async def handle_continue(self, term):
+        match term:
+            case ("log", reply):
+                await self._log(reply)
+```
+
+---
+
+## Named registration at start()
+
+Two mutually-exclusive ways to make a process discoverable at construction time:
+
+### `name=` — the global name map
+
+```python
+from fastactor.otp import whereis
+
+g = await GenServer.start(name="sessions")
+assert await whereis("sessions") is g
+
+# A second start with the same live name raises:
+#   Failed("already_started: sessions")
+```
+
+### `via=(registry_name, key)` — into a Registry
+
+```python
+from fastactor.otp import Registry, whereis
+
+await Registry.new("sessions", mode="unique")
+g = await GenServer.start(via=("sessions", user_id))
+assert await whereis(("sessions", user_id)) is g
+
+# Collisions in a unique registry raise AlreadyRegistered(pid) from the Registry layer.
+```
+
+Names and via-registrations both auto-free when the process terminates. Use `name=` for one-off singletons (one database client, one session manager). Use `via=` when you have many keyed instances (one session per user, one worker per tenant) — the `Registry` side also supports `duplicate` mode for pub/sub fan-out.
+
+Specifying both `name=` and `via=` in the same call raises `ValueError` — they populate different lookup tables and picking one keeps the mental model clean.
+
+---
+
+## Messages reference
+
+All messages carry `sender: Process | None`. Pattern-match on the concrete type in callbacks.
+
+```python
+@dataclass
+class Message:                          # abstract base
+    sender: Process | None
+
+@dataclass
+class Info(Message):                    # generic async message
+    message: Any
+
+@dataclass
+class Stop(Message):                    # graceful shutdown request; raises Shutdown internally
+    reason: Any
+
+@dataclass
+class Exit(Message):                    # delivered when a linked process exits (trap_exits=True)
+    reason: Any
+
+@dataclass
+class Down(Message):                    # delivered to monitors when the target terminates
+    reason: Any
+
+@dataclass
+class Call(Message):                    # synchronous request, awaits a reply
+    message: Any
+    # set_result(value) / await result(timeout) — you don't usually touch these
+
+@dataclass
+class Cast(Message):                    # fire-and-forget request
+    message: Any
+
+class Ignore:                           # sentinel returned from init to skip the loop
+    ...
+
+@dataclass
+class Continue:                         # sentinel for handle_continue scheduling
+    term: Any
+```
+
+`handle_info` receives whatever you sent via `proc.send(...)` or `proc.info(...)` — usually an `Info(sender, payload)` if you used `info()`, or the raw object if you used `send()`. `Call` / `Cast` / `Stop` / `Exit` are intercepted before `handle_info` in `GenServer`.
+
+---
+
+## Exceptions
+
+```python
+class Crashed(Exception):
+    reason: Any
+    def __str__(self) -> str: ...       # str(self.reason)
+
+class Failed(Exception):
+    reason: Any                         # supervisor failures: already_started, Max restart intensity, etc.
+    def __str__(self) -> str: ...
+
+class Shutdown(Exception):
+    reason: Any                         # normal shutdown sentinel; wraps around reason
+    def __str__(self) -> str: ...
+
+class AlreadyRegistered(Exception):
+    pid: Process                        # raised by Registry.register in unique mode
+```
+
+`Crashed` wraps exceptions raised in `init` (preserving the original via `__cause__`); `Runtime.spawn` unwraps `__cause__` before re-raising so callers see the real error type. `_is_normal_shutdown_reason(reason)` is the single source of truth for what counts as a normal exit (matches `"normal"`, `"shutdown"`, or `Shutdown(...)`).
+
+---
+
+## Settings
+
+Runtime defaults live in `fastactor.settings.Settings` (pydantic-settings). Override with `FASTACTOR_`-prefixed env vars.
+
+| Setting        | Env var                  | Default |
+| -------------- | ------------------------ | ------- |
+| `mailbox_size` | `FASTACTOR_MAILBOX_SIZE` | `1024`  |
+
+```bash
+FASTACTOR_MAILBOX_SIZE=4096 uv run python my_app.py
+```
+
+The mailbox size caps each process's inbox. `send_nowait` will raise `anyio.WouldBlock` if the mailbox is full.
+
+---
+
+## Idiomatic patterns
+
+### 1. Runtime per program, not per feature
+
+```python
+async def main():
+    async with Runtime():
+        # build your supervision tree here
+        ...
+
+if __name__ == "__main__":
+    anyio.run(main)
+```
+
+Never open two Runtimes concurrently. For tests, use an `async` fixture that enters/exits a single Runtime for the whole test.
+
+### 2. Build a supervision tree top-down
+
+```python
+async with Runtime() as rt:
+    app_sup = await Supervisor.start_link()
+    db = await app_sup.start_child(app_sup.child_spec("db", DbConn, restart="permanent"))
+    pool = await app_sup.start_child(app_sup.child_spec(
+        "pool",
+        DynamicSupervisor,
+        kwargs={"max_children": 50},
+        restart="permanent",
+        type="supervisor",
+    ))
+```
+
+Hang your supervisor under the runtime root, then hang workers under your supervisor — not directly under the runtime root.
+
+### 3. Deterministic cast sync via call round-trip
+
+```python
+# Server must handle "sync" with a non-None reply — e.g., return self.count or True.
+# The default base-class `handle_call` returns None, which is NoReply and will hang.
+server.cast(("set", key, value))
+await server.call("sync")           # round-trip guarantees the cast has been processed
+```
+
+The mailbox is strictly FIFO. A successful `call` reply proves every prior `cast` has already been handled. **Use this in tests instead of `asyncio.sleep`.**
+
+### 4. `start_link` by default, `start` for detached work
+
+`start_link` cascades failures through the supervision tree — that's the point of OTP. `start` is for work where a crash must not propagate (audit logging, background cleanup, best-effort emit).
+
+### 5. Trap exits to build a monitor
+
+```python
+class Watchdog(GenServer):
+    trap_exits = True                   # class-level default or pass at start()
+    async def handle_exit(self, msg: Exit):
+        logger.error("child %s died: %s", msg.sender, msg.reason)
+        # decide: restart? page? escalate?
+```
+
+### 6. Task for bounded parallelism
+
+```python
+tasks = [await Task.start(fetch, url) for url in urls]
+results = [await t for t in tasks]
+```
+
+For unbounded parallelism with backpressure, use a `TaskSupervisor` with `max_children`.
+
+### 7. Agent for "just hold this value"
+
+Don't write a full GenServer for a counter. Use `Agent`. If your state manipulation is complex enough to need match/case, promote to GenServer.
+
+---
+
+## Common gotchas
+
+### `handle_call` / `handle_cast` receive wrappers, not raw requests
+
+The callback signature is `handle_call(self, call: Call)`, not `handle_call(self, request, ...)`. Unpack with `call.message`:
+
+```python
+# correct
+async def handle_call(self, call: Call):
+    match call.message:
+        case ("get", key): return self.store[key]
+
+# WRONG
+async def handle_call(self, request, from_, state): ...
+```
+
+### `cast` is synchronous (not awaitable)
+
+`cast` calls `send_nowait` under the hood. It does *not* return a coroutine. Don't `await` it.
+
+```python
+server.cast("msg")          # correct
+await server.cast("msg")    # TypeError — cast returns None
+```
+
+### Only one Runtime at a time
+
+Nesting `async with Runtime():` raises. If you need child runtimes (tests, etc.), make sure each enters and exits cleanly.
+
+### `handle_call` returning `None` means NoReply, not "reply with None"
+
+Under the new contract, a `handle_call` body that falls through to `None` (including the default base-class implementation) does NOT resolve the caller's `await server.call(...)` — the caller stays blocked until something calls `call.set_result(value)`. To reply with the *literal* value `None`, either use a tuple form (`return (None, Continue("ok"))`) or resolve the Call explicitly (`call.set_result(None); return None` — but the second statement is redundant). In practice, pick a meaningful non-None reply (`True`, `"ok"`, the new state).
+
+### `call` timeout raises, doesn't return None
+
+```python
+try:
+    result = await server.call(req, timeout=1)
+except TimeoutError:
+    ...
+```
+
+### Exceptions in `handle_call` propagate in BOTH directions
+
+The caller sees the exception (good), and the server crashes (also good — this is Elixir semantics). If you want to reply with an error value instead, construct it explicitly:
+
+```python
+async def handle_call(self, call: Call):
+    try:
+        return self._work(call.message)
+    except KnownError as e:
+        return {"error": str(e)}        # caller gets the dict, server does NOT crash
+```
+
+### `_current_process` ContextVar powers the default `sender`
+
+Inside a callback, `_current_process` is set to the handling process. `server.call(req)` from inside `handle_info` defaults `sender` to `self`. You almost never override this manually — but know it's there when debugging messages that appear to come from `None`.
+
+### Normal exit reasons are a whitelist
+
+Only `"normal"`, `"shutdown"`, and `Shutdown(...)` are normal. Anything else — including `None`, `""`, `"ok"` — is treated as abnormal and cascades across links / triggers `transient` restarts.
+
+### `brutal_kill` skips `terminate`
+
+A child with `shutdown="brutal_kill"` has its mailbox closed immediately. `terminate()` won't run to completion, which means monitors may still see `Down` but cleanup you wrote in `terminate` won't fire. Use integer timeouts by default.
+
+### `DynamicSupervisor` only supports `one_for_one`
+
+Passing any other strategy raises `ValueError` in `init`. The error surfaces as the original exception from `start()` — good — but don't waste time trying `"one_for_all"` there.
+
+### `register_name` vs `Registry.register`
+
+Different things:
+
+- `Runtime.register_name` / `Process.start(name=...)` — **one** global name per process. Collides across the whole runtime. Backed by `runtime.registry` / `runtime._reverse_registry`.
+- `Registry.register(name, key, proc)` — scoped to a named registry, can have many keys per process, and supports `unique` or `duplicate` modes. Backed by `runtime.registries`.
+
+Use `name=` for singletons. Use `Registry` for everything else.
+
+### `Task.start()` is unlinked — the caller survives a crash
+
+If your task crashes and you don't `await` it, the exception is silently lost. Always `await` a task you care about, or use `Task.start_link(...)` so the cascade kills the caller too.
+
+---
+
+## Testing patterns
+
+See `src/tests/support.py` and `src/tests/conftest.py` for the canonical shapes. Rules of thumb:
+
+- **`pytestmark = pytest.mark.anyio`** at the top of each test file (async tests).
+- Autouse an `anyio_backend` fixture returning `"asyncio"`. The repo ships one in `conftest.py`.
+- **Scope a single `Runtime`** per test via a fixture:
+  ```python
+  @pytest.fixture
+  async def runtime():
+      async with Runtime() as rt:
+          yield rt
+  ```
+- **No `asyncio.sleep` to wait for actor state.** Replace with:
+  - `await proc.stopped()` + inspect `_crash_exc` for crash assertions.
+  - `await server.call(None)` after casts to force-drain the mailbox (FIFO sync).
+  - An `await_child_restart(sup, cid, old_proc)` helper polling on an `anyio.Event` + identity compare for restart tests.
+  - A `MonitorServer.await_events(n)` pattern: `handle_info` sets an `anyio.Event` when `len(events) >= n`.
+- The full non-e2e suite (114 tests) runs in under a second. There is exactly one intentional `sleep(...)` call — in `test_max_restarts_window_resets_after_max_seconds`, which genuinely needs a time gap — and it's annotated inline.
+
+### Example — crash assertion
+
+```python
+proc = await Worker.start()
+await proc.send("boom")              # hypothetical: triggers a crash in handle_info
+await proc.stopped()
+assert isinstance(proc._crash_exc, Crashed)
+assert "boom" in str(proc._crash_exc)
+```
+
+### Example — restart assertion
+
+```python
+old = await sup.start_child(spec)
+old.cast(("crash", RuntimeError("die")))
+await old.stopped()
+# wait for restart — the new process has a different id but the same child_id
+await await_child_restart(sup, "worker", old_proc=old)
+new = sup.children["worker"].process
+assert new is not old
+```
+
+---
+
+## Complete public surface
+
+```python
+# Top-level (from fastactor import ...)
+fastactor.run, fastactor.settings
+
+# from fastactor.otp import ...
+# Primitives
+Process, GenServer, Agent, Task, TaskSupervisor
+
+# Supervisors
+Supervisor, DynamicSupervisor, ChildSpec, RunningChild
+RestartStrategy, RestartType, ShutdownType
+
+# Runtime + lookup
+Runtime, Registry, whereis
+
+# Messages
+Call, Cast, Info, Stop, Exit, Down, Continue
+
+# Sentinels / exceptions
+Ignore, Shutdown, Crashed, Failed, AlreadyRegistered
+```
+
+---
+
+## Prior art & further reading
+
+Erlang/OTP and Elixir's `GenServer` / `Supervisor` / `DynamicSupervisor` / `Registry` / `Agent` / `Task` modules are the direct inspiration. If you want the "why" behind these primitives:
+
+- ["The Soul of Erlang and Elixir"](https://www.youtube.com/watch?v=JvBT4XBdoUE) — short, brilliant talk.
+- *Designing for Scalability with Erlang/OTP* (Cesarini & Vinoski, O'Reilly) — the long form.
+- Elixir stdlib source under `elixir/lib/elixir/` is the canonical reference for callback semantics.
+
+---
+
+## Source layout (for code diving)
+
+```
+src/fastactor/
+├── __init__.py
+├── settings.py                         # pydantic-settings
+├── utils.py                            # id_generator (ksuids)
+└── otp/
+    ├── __init__.py                     # public re-exports
+    ├── _exceptions.py                  # Crashed, Failed, Shutdown, _is_normal_shutdown_reason
+    ├── _messages.py                    # Call, Cast, Info, Stop, Exit, Down, Continue, Ignore
+    ├── process.py                      # Process (base actor, lifecycle, links/monitors)
+    ├── gen_server.py                   # GenServer
+    ├── supervisor.py                   # Supervisor, ChildSpec, strategies, restart intensity
+    ├── dynamic_supervisor.py           # DynamicSupervisor
+    ├── registry.py                     # Registry, AlreadyRegistered
+    ├── agent.py                        # Agent
+    ├── task.py                         # Task, TaskSupervisor
+    └── runtime.py                      # Runtime, RuntimeSupervisor, _current_process ContextVar
+```
+
+Reading top-to-bottom: `_messages.py` → `_exceptions.py` → `process.py` → `gen_server.py` → `supervisor.py` → `runtime.py` gives you the full picture. The rest (DynamicSupervisor, Registry, Agent, Task) are additive on top of that core.
+
+---
+
+## License
+
+MIT — see `LICENSE`.

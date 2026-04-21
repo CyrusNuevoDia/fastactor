@@ -1,5 +1,9 @@
 .DS_Store
 
+# Reference / scratch — not part of the package
+/elixir/
+.claude/scheduled_tasks.lock
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
