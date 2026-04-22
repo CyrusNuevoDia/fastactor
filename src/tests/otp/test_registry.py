@@ -1,5 +1,5 @@
 import pytest
-from support import CounterServer, EchoServer
+from helpers import CounterServer, EchoServer
 
 from fastactor.otp import AlreadyRegistered, Failed, Registry, Runtime
 

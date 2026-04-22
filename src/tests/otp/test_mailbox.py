@@ -6,12 +6,31 @@ See `SPEC.md` §3 for the source claims.
 from typing import Any
 
 import pytest
-from anyio import create_task_group, fail_after, sleep
-from support import SelfSender
+from anyio import Event, create_task_group, fail_after, sleep
 
-from fastactor.otp import GenServer, Info
+from fastactor.otp import Continue, GenServer, Info, Process
 
 pytestmark = pytest.mark.anyio
+
+
+class SelfSender(Process):
+    async def init(self, payload: Any = "ping") -> Continue:
+        self.received: list[Any] = []
+        self._delivered = Event()
+        self._payload = payload
+        return Continue("send-self")
+
+    async def handle_continue(self, term: Any) -> None:
+        await self.send(self._payload)
+
+    async def _handle_message(self, message: Any) -> None:
+        self.received.append(message)
+        self._delivered.set()
+
+    async def await_delivery(self, timeout: float = 2) -> list[Any]:
+        with fail_after(timeout):
+            await self._delivered.wait()
+        return list(self.received)
 
 
 class InboxRecorder(GenServer):

@@ -3,7 +3,7 @@ from time import monotonic
 import pytest
 from anyio import Event, fail_after, sleep
 from anyio.lowlevel import checkpoint
-from support import BoomServer, LinkServer, MonitorServer, OrderObserver
+from helpers import BoomServer, LinkServer, MonitorServer, OrderLog
 
 from fastactor.otp import (
     Call,
@@ -88,7 +88,7 @@ class OrderedCrashServer(GenServer):
             raise RuntimeError(self.label)
 
     async def terminate(self, reason):
-        OrderObserver.record(self.label)
+        OrderLog.record(self.label)
         await super().terminate(reason)
 
 
@@ -592,7 +592,7 @@ async def test_trapped_link_and_monitor_both_receive_notifications() -> None:
 
 async def test_chain_crash_propagates_in_link_order() -> None:
     """G: a linked X -> Y -> Z chain. W: Z crashes. T: shutdown propagates Z then Y then X."""
-    OrderObserver.reset()
+    OrderLog.reset()
     x = await OrderedCrashServer.start("x")
     y = await OrderedCrashServer.start("y")
     z = await OrderedCrashServer.start("z")
@@ -606,7 +606,7 @@ async def test_chain_crash_propagates_in_link_order() -> None:
     await await_process_stop(y)
     await await_process_stop(x)
 
-    assert OrderObserver.snapshot() == ["z", "y", "x"]
+    assert OrderLog.snapshot() == ["z", "y", "x"]
     assert str(x._crash_exc) == "z"
     assert str(y._crash_exc) == "z"
     assert str(z._crash_exc) == "z"

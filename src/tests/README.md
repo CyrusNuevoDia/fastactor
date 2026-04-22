@@ -61,22 +61,21 @@ async def test_rest_for_one_restarts_downstream(make_supervisor):
 
 ## Shared doubles
 
-Reusable `GenServer` subclasses live in [`./support.py`](./support.py). Import with `from support import ...` — `conftest.py` inserts `src/tests/` onto `sys.path`.
+Reusable `GenServer` subclasses live in [`./otp/helpers.py`](./otp/helpers.py). Import with `from helpers import ...` — `conftest.py` inserts both `src/tests/` and `src/tests/otp/` onto `sys.path`.
 
 | Double             | Purpose                                                                          |
 | ------------------ | -------------------------------------------------------------------------------- |
 | `EchoServer`       | Logs casts, echoes calls. Simplest working `GenServer`.                          |
 | `CounterServer`    | Adds/subtracts/multiplies/resets via casts; `get` / `sync` via calls.            |
 | `BoomServer`       | Crashes on `call("boom")`; `init(on_init=True)` crashes during init.             |
-| `CrashyServer`     | Always crashes in `init`. For supervisor-intensity and init-failure tests.       |
 | `SlowStopServer`   | Sleeps ~50ms in `terminate`. For shutdown-timeout / `brutal_kill` tests.         |
 | `MonitorServer`    | Appends `Down` messages; `await_events(n)` blocks until `n` received.            |
 | `LinkServer`       | Trap-exits variant of MonitorServer; collects `Exit` messages.                   |
 | `ContinueServer`   | Records `init` → `handle_continue` → `handle_call` order.                        |
-| `OrderObserver`    | Thread-safe global event log for cross-actor ordering assertions.                |
+| `OrderLog`         | Thread-safe global event log for cross-actor ordering assertions.                |
 | `await_child_restart(sup, cid, old_proc, timeout=2)` | Blocks until the supervisor swaps `cid` to a new process (identity-compared against `old_proc`). |
 
-Reuse these rather than rolling minimal `GenServer` subclasses in every test file. E2E helpers live separately in [`./e2e/support.py`](./e2e/support.py).
+Reuse these rather than rolling minimal `GenServer` subclasses in every test file. E2E helpers live separately in [`./e2e/helpers.py`](./e2e/helpers.py).
 
 ---
 

@@ -28,15 +28,15 @@ InMemorySpanExporter = importlib.import_module(
 StatusCode = trace_api.StatusCode
 tel = importlib.import_module("fastactor.telemetry")
 otp = importlib.import_module("fastactor.otp")
-support = importlib.import_module("support")
+helpers = importlib.import_module("helpers")
 Call = otp.Call
 Continue = otp.Continue
 GenServer = otp.GenServer
 Runtime = otp.Runtime
 Supervisor = otp.Supervisor
-BoomServer = support.BoomServer
-EchoServer = support.EchoServer
-await_child_restart = support.await_child_restart
+BoomServer = helpers.BoomServer
+EchoServer = helpers.EchoServer
+await_child_restart = helpers.await_child_restart
 
 
 pytestmark = pytest.mark.anyio

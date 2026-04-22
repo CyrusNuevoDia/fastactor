@@ -35,9 +35,9 @@ Tests are split into three trees:
 
 Tests are async. `src/tests/conftest.py` installs an autouse `anyio_backend` fixture that forces the `asyncio` backend and an autouse `_active_runtime` fixture that wraps every test in `async with Runtime()` (exposed as the `runtime` fixture); it also offers a `supervisor` fixture (`runtime.supervisor`) and a `make_supervisor` factory for isolated test supervisors. Each test module sets `pytestmark = pytest.mark.anyio`. When adding new test files, either add the same `pytestmark` or mark individual tests with `@pytest.mark.anyio`.
 
-Shared test doubles — `EchoServer`, `CounterServer`, `BoomServer`, `CrashyServer`, `SlowStopServer`, `MonitorServer`, `LinkServer`, `ContinueServer`, `OrderObserver`, and the `await_child_restart` helper — live in `src/tests/otp/support.py`. Reuse these rather than re-rolling minimal `GenServer` subclasses in each test file. E2E helpers live separately in `src/tests/e2e/support.py`.
+Shared test doubles — `EchoServer`, `CounterServer`, `BoomServer`, `SlowStopServer`, `MonitorServer`, `LinkServer`, `ContinueServer`, `OrderLog`, and the `await_child_restart` helper — live in `src/tests/otp/helpers.py`. Reuse these rather than re-rolling minimal `GenServer` subclasses in each test file. E2E helpers live separately in `src/tests/e2e/helpers.py`.
 
-`conftest.py` prepends both `src/tests/` and `src/tests/otp/` to `sys.path` (with `otp/` winning), so unit tests, tutorial tests, and e2e tests can all `from support import ...` and reach the otp doubles. `pyproject.toml` mirrors this in `[tool.ty.environment].extra-paths` so the type checker resolves the same imports.
+`conftest.py` prepends both `src/tests/` and `src/tests/otp/` to `sys.path` (with `otp/` winning), so unit tests, tutorial tests, and e2e tests can all `from helpers import ...` and reach the otp doubles. `pyproject.toml` mirrors this in `[tool.ty.environment].extra-paths` so the type checker resolves the same imports.
 
 ## Architecture
 

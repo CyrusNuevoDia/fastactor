@@ -60,8 +60,8 @@ full guide.
   runs inside an active FastActor `Runtime` without ceremony.
 - Shared test doubles (`EchoServer`, `CounterServer`, `BoomServer`,
   `MonitorServer`, `LinkServer`, `ContinueServer`, `await_child_restart`)
-  live in `src/tests/otp/support.py`. Tutorial tests import them with
-  `from support import ...` — both `src/tests/` and `src/tests/otp/` are on
+  live in `src/tests/otp/helpers.py`. Tutorial tests import them with
+  `from helpers import ...` — both `src/tests/` and `src/tests/otp/` are on
   `sys.path`.
 - No `asyncio.sleep` / `anyio.sleep` is used to wait for actor state. The
   standard deterministic patterns are `await proc.stopped()`, call-after-cast,

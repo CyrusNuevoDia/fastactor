@@ -42,7 +42,7 @@ New concepts: `Supervisor`, `ChildSpec` (via `sup.child_spec(...)`),
 
 Read the relevant source:
   - src/fastactor/otp/supervisor.py
-  - src/tests/otp/support.py  (await_child_restart helper)
+  - src/tests/otp/helpers.py  (await_child_restart helper)
 """
 
 from typing import cast
@@ -50,7 +50,7 @@ from typing import cast
 from anyio import fail_after
 from anyio.lowlevel import checkpoint
 import pytest
-from support import BoomServer, CounterServer, await_child_restart
+from helpers import BoomServer, CounterServer, await_child_restart
 
 pytestmark = pytest.mark.anyio
 

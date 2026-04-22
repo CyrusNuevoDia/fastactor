@@ -1,5 +1,4 @@
 from collections.abc import AsyncIterator, Awaitable, Callable
-from itertools import count
 from pathlib import Path
 import sys
 
@@ -45,7 +44,6 @@ async def make_supervisor(
     runtime: Runtime,
 ) -> AsyncIterator[Callable[..., Awaitable[Supervisor]]]:
     created: list[Supervisor] = []
-    ids = count(1)
 
     async def factory(
         *,
@@ -53,7 +51,6 @@ async def make_supervisor(
         max_restarts: int = settings.supervisor_max_restarts,
         max_seconds: float = settings.supervisor_max_seconds,
     ) -> Supervisor:
-        _ = f"supervisor_{next(ids)}"
         sup = await Supervisor.start(
             strategy=strategy,
             max_restarts=max_restarts,

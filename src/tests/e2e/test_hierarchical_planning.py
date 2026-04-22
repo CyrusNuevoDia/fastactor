@@ -14,7 +14,7 @@ from typing import cast
 import anyio
 import pytest
 
-from e2e.support import AgentReply, Ask, FakeAgent, poll_value
+from e2e.helpers import AgentReply, Ask, FakeAgent, poll_value
 from fastactor.otp import Agent, DynamicSupervisor
 
 pytestmark = pytest.mark.anyio

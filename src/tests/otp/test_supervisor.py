@@ -5,10 +5,10 @@ from typing import Any, cast
 import pytest
 from anyio import fail_after, sleep
 from anyio.lowlevel import checkpoint
-from support import (
+from helpers import (
     BoomServer,
     CounterServer,
-    OrderObserver,
+    OrderLog,
     SlowStopServer,
     await_child_restart,
 )
@@ -28,7 +28,7 @@ class TerminationRecorder(GenServer):
         self.label = label
 
     async def terminate(self, reason: Any) -> None:
-        OrderObserver.record(self.label)
+        OrderLog.record(self.label)
         await super().terminate(reason)
 
 
@@ -38,7 +38,7 @@ class LabeledBoom(BoomServer):
         await super().init(on_init=on_init)
 
     async def terminate(self, reason: Any) -> None:
-        OrderObserver.record(self.label)
+        OrderLog.record(self.label)
         await super().terminate(reason)
 
 
@@ -588,7 +588,7 @@ async def test_6_7_children_shutdown_in_reverse_start_order(make_supervisor) -> 
 
     Source: https://www.erlang.org/doc/apps/stdlib/supervisor.html §"Shutdown"
     """
-    OrderObserver.reset()
+    OrderLog.reset()
     sup = await make_supervisor()
     await sup.start_child(
         sup.child_spec("a", LabeledBoom, args=("a",), restart="temporary")
@@ -602,4 +602,4 @@ async def test_6_7_children_shutdown_in_reverse_start_order(make_supervisor) -> 
 
     await sup.stop("normal")
 
-    assert OrderObserver.snapshot() == ["c", "b", "a"]
+    assert OrderLog.snapshot() == ["c", "b", "a"]

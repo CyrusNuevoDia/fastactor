@@ -12,7 +12,7 @@ race — no bookkeeping per call-site.
 import anyio
 import pytest
 
-from e2e.support import AgentReply, Ask, FakeAgent
+from e2e.helpers import AgentReply, Ask, FakeAgent
 from fastactor.otp import DynamicSupervisor, Exit, GenServer
 
 pytestmark = pytest.mark.anyio

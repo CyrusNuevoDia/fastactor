@@ -29,7 +29,7 @@ Read the relevant source:
 """
 
 import pytest
-from support import BoomServer, EchoServer, LinkServer, MonitorServer
+from helpers import BoomServer, EchoServer, LinkServer, MonitorServer
 
 pytestmark = pytest.mark.anyio
 

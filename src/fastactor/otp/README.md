@@ -513,7 +513,7 @@ async with Runtime():
 
 ## `handle_continue`
 
-**Source:** [`process.py`](./process.py), [`gen_server.py`](./gen_server.py) · **Tests:** `ContinueServer` in [`../../tests/support.py`](../../tests/support.py)
+**Source:** [`process.py`](./process.py), [`gen_server.py`](./gen_server.py) · **Tests:** `ContinueServer` in [`../../tests/otp/helpers.py`](../../tests/otp/helpers.py)
 
 Elixir-style `{:continue, term}`. Schedules a follow-up callback without re-entering the mailbox loop. Useful for deferred init, cleanup after a call, or chaining long work.
 

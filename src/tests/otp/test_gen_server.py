@@ -3,12 +3,10 @@ from typing import Any
 import pytest
 from anyio import Event, create_task_group, fail_after, sleep
 from anyio.lowlevel import checkpoint
-from support import (
+from helpers import (
     CounterServer,
-    DeferredReplyServer,
     EchoServer,
     MonitorServer,
-    StopInInitServer,
 )
 
 from fastactor.otp import (
@@ -25,6 +23,20 @@ from fastactor.otp import (
 )
 
 pytestmark = pytest.mark.anyio
+
+
+class StopInInitServer(GenServer):
+    async def init(self, reason: Any = "boot_failed") -> Stop:
+        return Stop(None, reason)
+
+
+class DeferredReplyServer(GenServer):
+    async def init(self) -> None:
+        self.pending: list[Call] = []
+
+    async def handle_call(self, call: Call) -> None:
+        self.pending.append(call)
+        return None
 
 
 class InfoServer(GenServer):

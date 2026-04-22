@@ -1,5 +1,5 @@
 import pytest
-from support import BoomServer, CounterServer, await_child_restart
+from helpers import BoomServer, CounterServer, await_child_restart
 
 from fastactor.otp import DynamicSupervisor, Failed
 
