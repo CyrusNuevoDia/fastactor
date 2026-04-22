@@ -542,14 +542,15 @@ class ProducerConsumer[In, Out](GenStage):
         return sub_id
 
     async def cancel_subscription(self, sub_id: str, reason: t.Any = "normal") -> None:
-        info = self._consumer_subs.get(sub_id)
+        # Pop BEFORE the first await so any Events still in the mailbox for this
+        # sub_id are ignored by _do_events (which checks _consumer_subs).
+        info = self._consumer_subs.pop(sub_id, None)
         if info is None:
             return
         try:
             await info.peer.send(Cancel(self, sub_id, reason))
         except Exception:
             pass
-        self._consumer_subs.pop(sub_id, None)
 
     async def handle_events(  # type: ignore[override]
         self, events: list[In]

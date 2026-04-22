@@ -265,6 +265,28 @@ async def test_cancel_subscription():
     await consumer.stop()
 
 
+async def test_producer_consumer_cancel_subscription():
+    """ProducerConsumer.cancel_subscription drops any in-flight upstream events."""
+    producer = await NumberProducer.start(start=0, chunk=3)
+    doubler = await DoublerProducerConsumer.start()
+    consumer = await CollectorConsumer.start(max_demand=6)
+
+    sub_id = await doubler.subscribe_to(producer, max_demand=3)
+    await consumer.subscribe_to(doubler, max_demand=6)
+
+    await consumer.await_n(3)
+    snapshot = len(consumer.received)
+
+    await doubler.cancel_subscription(sub_id)
+    await sleep(0.2)
+
+    assert len(consumer.received) == snapshot
+
+    await producer.stop()
+    await doubler.stop()
+    await consumer.stop()
+
+
 async def test_handle_call_alongside_events():
     """GenServer call works on a Producer even while it is serving demand."""
     producer = await EchoProducer.start()

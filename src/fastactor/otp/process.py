@@ -208,8 +208,8 @@ class Process:
         self.links.discard(other)
         other.links.discard(self)
 
-    def _drop_monitor_ref(self, ref: str) -> "Process | None":
-        return self.monitors.pop(ref, None)
+    def _drop_monitor_ref(self, ref: str) -> None:
+        self.monitors.pop(ref, None)
 
     def _monitor_refs(self, other_or_ref: "Process | str") -> list[str]:
         if isinstance(other_or_ref, Process):

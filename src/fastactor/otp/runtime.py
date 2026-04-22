@@ -229,8 +229,6 @@ class Runtime:
     def recent_crashes(self, n: int = 50) -> list[CrashRecord]:
         if n <= 0:
             return []
-        if n >= len(self._crash_log):
-            return list(self._crash_log)
         return list(self._crash_log)[-n:]
 
     def crash_counts(self) -> dict[str, int]:

@@ -716,10 +716,6 @@ class Supervisor(Process):
         await ready.wait()
         return self.children[child_id].process
 
-    def _check_task_group(self):
-        if self._task_group is None:
-            raise Failed("Supervisor not running")
-
     @staticmethod
     def child_spec[P: Process](
         child_id: str,
