@@ -214,9 +214,7 @@ class Process:
     def _monitor_refs(self, other_or_ref: "Process | str") -> list[str]:
         if isinstance(other_or_ref, Process):
             return [
-                ref
-                for ref, process in self.monitors.items()
-                if process == other_or_ref
+                ref for ref, process in self.monitors.items() if process == other_or_ref
             ]
         return [other_or_ref]
 
@@ -230,9 +228,7 @@ class Process:
         other.monitored_by[ref] = self
         return ref
 
-    def demonitor(
-        self, other_or_ref: "Process | str", *, flush: bool = False
-    ) -> None:
+    def demonitor(self, other_or_ref: "Process | str", *, flush: bool = False) -> None:
         refs = self._monitor_refs(other_or_ref)
 
         for ref in refs:
@@ -314,13 +310,13 @@ class Process:
         *args,
         **kwargs,
     ) -> R:
-        from .runtime import _current_process
+        from .runtime import current_process
 
-        token = _current_process.set(self)
+        token = current_process.set(self)
         try:
             return await func(*args, **kwargs)
         finally:
-            _current_process.reset(token)
+            current_process.reset(token)
 
     def _set_pending_continue(self, result: t.Any):
         if isinstance(result, Continue):

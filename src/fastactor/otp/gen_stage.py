@@ -29,6 +29,7 @@ from fastactor.utils import id_generator
 
 from ._messages import Cancel, Demand, Events, Subscribe, SubscribeAck
 from .gen_server import GenServer
+from .process import Process
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +179,7 @@ class PartitionDispatcher:
 @dataclass
 class _SubscriptionInfo:
     sub_id: str
-    peer: "GenStage"
+    peer: Process
     max_demand: int = 1000
     min_demand: int = 0
     cancel: str = "permanent"
@@ -273,7 +274,7 @@ class GenStage(GenServer):
 
         info = _SubscriptionInfo(
             sub_id=sub_id,
-            peer=consumer,  # type: ignore[arg-type]
+            peer=consumer,
             max_demand=opts.get("max_demand", 1000),
             min_demand=opts.get("min_demand", 0),
             cancel=opts.get("cancel", "permanent"),
@@ -478,7 +479,7 @@ class Consumer[E](GenStage):
         }
         info = _SubscriptionInfo(
             sub_id=sub_id,
-            peer=producer,  # type: ignore[arg-type]
+            peer=producer,
             max_demand=max_demand,
             min_demand=min_demand,
             cancel=cancel,
@@ -531,7 +532,7 @@ class ProducerConsumer[In, Out](GenStage):
         }
         info = _SubscriptionInfo(
             sub_id=sub_id,
-            peer=producer,  # type: ignore[arg-type]
+            peer=producer,
             max_demand=max_demand,
             min_demand=min_demand,
             cancel=cancel,

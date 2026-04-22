@@ -9,12 +9,12 @@ failure boundary is declared, not coded.
 """
 
 # `anyio.sleep` is used in the compute loop to simulate work; deterministic
-# waits elsewhere use `fail_after` + `await_value`.
+# waits elsewhere use `fail_after` + `poll_value`.
 import anyio
 import pytest
 from support import await_child_restart
 
-from e2e.support import await_value
+from e2e.support import poll_value
 from fastactor.otp import Agent, GenServer, Supervisor, Task
 
 pytestmark = pytest.mark.anyio
@@ -146,5 +146,5 @@ async def test_compute_exceeding_intensity_escalates_and_stops_state(runtime):
         await sup.stopped()
 
     assert sup.has_stopped()
-    await await_value(lambda: state.has_stopped(), lambda v: v, timeout=2)
+    await poll_value(lambda: state.has_stopped(), lambda v: v, timeout=2)
     assert state.has_stopped()

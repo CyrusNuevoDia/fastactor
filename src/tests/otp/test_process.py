@@ -5,7 +5,17 @@ from anyio import Event, fail_after, sleep
 from anyio.lowlevel import checkpoint
 from support import BoomServer, LinkServer, MonitorServer, OrderObserver
 
-from fastactor.otp import Call, Continue, Crashed, Exit, GenServer, Ignore, Info, Process, Runtime
+from fastactor.otp import (
+    Call,
+    Continue,
+    Crashed,
+    Exit,
+    GenServer,
+    Ignore,
+    Info,
+    Process,
+    Runtime,
+)
 
 pytestmark = pytest.mark.anyio
 

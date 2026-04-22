@@ -28,8 +28,8 @@ from .supervisor import Supervisor
 
 logger = logging.getLogger(__name__)
 
-_current_process: ContextVar[Process | None] = ContextVar(
-    "_current_process",
+current_process: ContextVar[Process | None] = ContextVar(
+    "current_process",
     default=None,
 )
 
@@ -256,7 +256,7 @@ class Runtime:
             telemetry.ATTR_PROCESS_ID: process.id,
             telemetry.ATTR_PROCESS_CLASS: type(process).__name__,
         }
-        parent = _current_process.get()
+        parent = current_process.get()
         if parent is not None:
             attrs[telemetry.ATTR_PARENT_ID] = parent.id
 
@@ -293,7 +293,7 @@ class Runtime:
 
         if process.has_stopped():
             if process._ignored:
-                return "ignore"  # type: ignore[return-value]
+                return "ignore"  # type: ignore[return-value]  # ty: ignore[invalid-return-type]
             exc = process._crash_exc
             if exc is not None:
                 raise exc.__cause__ if exc.__cause__ is not None else exc

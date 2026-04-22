@@ -1,4 +1,5 @@
 import importlib
+import subprocess
 import sys
 import typing as t
 from pathlib import Path
@@ -150,6 +151,36 @@ class DeferredServer(GenServer):
     async def _reply_later(self, call: Call) -> None:
         await sleep(0.1)
         call.set_result("done")
+
+
+def test_import_without_opentelemetry() -> None:
+    code = """
+from importlib import import_module
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path.cwd() / "src"))
+sys.modules["opentelemetry"] = None
+
+telemetry = import_module("fastactor.telemetry")
+assert telemetry.is_enabled() is False
+
+try:
+    telemetry.instrument(object())
+except RuntimeError as error:
+    assert "fastactor[otel]" in str(error) or "OpenTelemetry is not installed" in str(error)
+else:
+    raise AssertionError("instrument unexpectedly succeeded")
+"""
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parents[2],
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr or proc.stdout
 
 
 async def test_two_hop_call_produces_correct_parent_chain() -> None:

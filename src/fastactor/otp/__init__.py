@@ -25,6 +25,13 @@ from .gen_stage import (
 )
 from .agent import Agent
 from .dynamic_supervisor import DynamicSupervisor
+from .gen_event import (
+    EventHandler,
+    GenEvent,
+    HandlerNotInstalled,
+    RemoveHandler,
+    SwapHandler,
+)
 from .gen_server import GenServer
 from .gen_state_machine import (
     GenStateMachine,
@@ -64,12 +71,15 @@ __all__ = [
     "DemandDispatcher",
     "Down",
     "DynamicSupervisor",
+    "EventHandler",
     "Events",
     "Exit",
     "Failed",
+    "GenEvent",
     "GenServer",
     "GenStateMachine",
     "GenStage",
+    "HandlerNotInstalled",
     "Hibernate",
     "Ignore",
     "Info",
@@ -79,6 +89,7 @@ __all__ = [
     "Process",
     "Producer",
     "ProducerConsumer",
+    "RemoveHandler",
     "Reply",
     "Registry",
     "RestartStrategy",
@@ -92,6 +103,7 @@ __all__ = [
     "Subscribe",
     "SubscribeAck",
     "Supervisor",
+    "SwapHandler",
     "Task",
     "TaskSupervisor",
     "Timeout",

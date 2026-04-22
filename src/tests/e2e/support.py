@@ -57,7 +57,7 @@ class FakeAgent(GenServer):
         await super().terminate(reason)
 
 
-async def await_value[T](
+async def poll_value[T](
     fn: Callable[[], T | Awaitable[T]],
     predicate: Callable[[T], bool],
     timeout: float = 2.0,

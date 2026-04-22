@@ -3,9 +3,26 @@ from typing import Any
 import pytest
 from anyio import Event, create_task_group, fail_after, sleep
 from anyio.lowlevel import checkpoint
-from support import CounterServer, DeferredReplyServer, EchoServer, MonitorServer, StopInInitServer
+from support import (
+    CounterServer,
+    DeferredReplyServer,
+    EchoServer,
+    MonitorServer,
+    StopInInitServer,
+)
 
-from fastactor.otp import Call, Cast, Continue, Failed, GenServer, Ignore, Info, Runtime, Shutdown, Stop
+from fastactor.otp import (
+    Call,
+    Cast,
+    Continue,
+    Failed,
+    GenServer,
+    Ignore,
+    Info,
+    Runtime,
+    Shutdown,
+    Stop,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -259,7 +276,7 @@ async def test_4_1_init_ok_state_timeout() -> None:
     """
 
     class TimeoutInit(GenServer):
-        async def init(self) -> tuple[None, int]:  # type: ignore[override]
+        async def init(self) -> tuple[None, int]:
             self.timed_out = False
             return (None, 100)
 

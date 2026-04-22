@@ -8,7 +8,12 @@ pattern, and exception propagation rules.
 import logging
 import typing as t
 
-from anyio import BrokenResourceError, ClosedResourceError, create_memory_object_stream, move_on_after
+from anyio import (
+    BrokenResourceError,
+    ClosedResourceError,
+    create_memory_object_stream,
+    move_on_after,
+)
 
 from fastactor import telemetry
 from fastactor.settings import settings
@@ -64,6 +69,11 @@ class GenServer[Req = t.Any, Rep = t.Any](Process):
                     f"unsupported init return shape for {type(self).__name__}: "
                     f"{init_result!r}"
                 )
+
+    async def init(  # ty: ignore[invalid-method-override]
+        self, *args, **kwargs
+    ) -> Ignore | Stop | Continue | tuple[t.Any, int | float] | None:
+        return None
 
     async def handle_call(
         self, call: Call[Req, Rep]
@@ -125,12 +135,12 @@ class GenServer[Req = t.Any, Rep = t.Any](Process):
         *,
         metadata: dict[str, t.Any] | None = None,
     ) -> Rep:
-        from .runtime import _current_process
+        from .runtime import current_process
 
         if self.has_stopped():
             raise Failed("noproc")
 
-        sender = sender or _current_process.get() or self.supervisor
+        sender = sender or current_process.get() or self.supervisor
 
         if telemetry.is_enabled():
             with telemetry.get_tracer().start_as_current_span(
@@ -162,9 +172,9 @@ class GenServer[Req = t.Any, Rep = t.Any](Process):
         *,
         metadata: dict[str, t.Any] | None = None,
     ) -> None:
-        from .runtime import _current_process
+        from .runtime import current_process
 
-        sender = sender or _current_process.get() or self.supervisor
+        sender = sender or current_process.get() or self.supervisor
         try:
             self.send_nowait(Cast(sender, request, metadata=metadata))
         except (BrokenResourceError, ClosedResourceError):
@@ -182,7 +192,7 @@ class GenServer[Req = t.Any, Rep = t.Any](Process):
                 case (value, Stop() as stop):
                     message.set_result(value)
                     raise Shutdown(stop.reason)
-                case (value, int() | float() as timeout_ms):
+                case (value, int() | float() as timeout_ms) if isinstance(reply, tuple):
                     # {reply, Reply, State, Timeout} — reply + arm idle timer
                     self._idle_timeout = timeout_ms / 1000.0
                     message.set_result(value)

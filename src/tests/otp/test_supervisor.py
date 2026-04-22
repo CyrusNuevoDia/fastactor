@@ -2,11 +2,16 @@
 
 from typing import Any, cast
 
-import anyio
 import pytest
 from anyio import fail_after, sleep
 from anyio.lowlevel import checkpoint
-from support import BoomServer, CounterServer, OrderObserver, SlowStopServer, await_child_restart
+from support import (
+    BoomServer,
+    CounterServer,
+    OrderObserver,
+    SlowStopServer,
+    await_child_restart,
+)
 
 from fastactor.otp import Failed, GenServer, Supervisor
 
@@ -28,7 +33,7 @@ class TerminationRecorder(GenServer):
 
 
 class LabeledBoom(BoomServer):
-    async def init(self, label: str, on_init: bool = False) -> None:
+    async def init(self, label: str, on_init: bool = False) -> None:  # ty: ignore[invalid-method-override]
         self.label = label
         await super().init(on_init=on_init)
 
@@ -90,7 +95,9 @@ async def test_start_child_registers_spec_and_rejects_duplicate_ids(make_supervi
         await sup.start_child(sup.child_spec("worker", GenServer))
 
 
-async def test_terminate_child_marks_process_undefined_and_allows_delete(make_supervisor):
+async def test_terminate_child_marks_process_undefined_and_allows_delete(
+    make_supervisor,
+):
     """G: a running child. W: terminate_child is called. T: the spec remains and the process becomes undefined."""
     sup = await make_supervisor()
     child = await sup.start_child(
@@ -209,7 +216,9 @@ async def test_6_1_default_period_is_5(make_supervisor) -> None:
 
 
 @pytest.mark.parametrize("strategy", ["one_for_one", "one_for_all", "rest_for_one"])
-async def test_6_1_accepts_three_standard_strategies(make_supervisor, strategy: str) -> None:
+async def test_6_1_accepts_three_standard_strategies(
+    make_supervisor, strategy: str
+) -> None:
     """SPEC §6.1: one_for_one, one_for_all, and rest_for_one are all accepted strategies.
 
     Source: https://www.erlang.org/doc/apps/stdlib/supervisor.html#type-strategy
@@ -262,7 +271,9 @@ async def test_6_2_child_spec_default_type_is_worker(make_supervisor) -> None:
     assert spec.type == "worker"
 
 
-async def test_6_2_child_spec_default_worker_shutdown_is_5_seconds(make_supervisor) -> None:
+async def test_6_2_child_spec_default_worker_shutdown_is_5_seconds(
+    make_supervisor,
+) -> None:
     """SPEC §6.2: shutdown defaults to 5000 ms (5 s) for workers.
 
     Source: https://www.erlang.org/doc/apps/stdlib/supervisor.html#type-child_spec
@@ -272,7 +283,9 @@ async def test_6_2_child_spec_default_worker_shutdown_is_5_seconds(make_supervis
     assert spec.shutdown == 5
 
 
-async def test_6_2_child_spec_default_supervisor_shutdown_is_infinity(make_supervisor) -> None:
+async def test_6_2_child_spec_default_supervisor_shutdown_is_infinity(
+    make_supervisor,
+) -> None:
     """SPEC §6.2: shutdown defaults to `infinity` for supervisor-type children.
 
     Source: https://www.erlang.org/doc/apps/stdlib/supervisor.html#type-child_spec
@@ -300,7 +313,9 @@ async def test_6_2_duplicate_child_ids_are_rejected(make_supervisor) -> None:
 
 @pytest.mark.parametrize("restart", ["permanent", "transient", "temporary"])
 @pytest.mark.parametrize("exit_kind", ["normal", "shutdown", "crash"])
-async def test_6_3_restart_type_matrix(make_supervisor, restart: str, exit_kind: str) -> None:
+async def test_6_3_restart_type_matrix(
+    make_supervisor, restart: str, exit_kind: str
+) -> None:
     """SPEC §6.3: Restart only when the spec demands it given the exit reason category.
 
     Source: https://www.erlang.org/doc/apps/stdlib/supervisor.html#type-restart
@@ -314,7 +329,9 @@ async def test_6_3_restart_type_matrix(make_supervisor, restart: str, exit_kind:
         await child.stop(exit_kind)
         await await_process_stop(child)
 
-    should_restart = restart == "permanent" or (restart == "transient" and exit_kind == "crash")
+    should_restart = restart == "permanent" or (
+        restart == "transient" and exit_kind == "crash"
+    )
 
     if should_restart:
         restarted = await await_child_restart(sup, "worker", child)
@@ -362,15 +379,23 @@ async def test_6_4_one_for_all_restarts_every_child(make_supervisor) -> None:
     assert new_b is not b
 
 
-async def test_6_4_rest_for_one_restarts_failed_and_later_siblings(make_supervisor) -> None:
+async def test_6_4_rest_for_one_restarts_failed_and_later_siblings(
+    make_supervisor,
+) -> None:
     """SPEC §6.4: rest_for_one — children started AFTER the failure restart; earlier siblings untouched.
 
     Source: https://www.erlang.org/doc/apps/stdlib/supervisor.html#type-strategy
     """
     sup = await make_supervisor(strategy="rest_for_one")
-    first = await sup.start_child(sup.child_spec("first", BoomServer, restart="permanent"))
-    middle = await sup.start_child(sup.child_spec("middle", BoomServer, restart="permanent"))
-    last = await sup.start_child(sup.child_spec("last", BoomServer, restart="permanent"))
+    first = await sup.start_child(
+        sup.child_spec("first", BoomServer, restart="permanent")
+    )
+    middle = await sup.start_child(
+        sup.child_spec("middle", BoomServer, restart="permanent")
+    )
+    last = await sup.start_child(
+        sup.child_spec("last", BoomServer, restart="permanent")
+    )
 
     await _crash(middle)
 
@@ -386,7 +411,9 @@ async def test_6_4_rest_for_one_restarts_failed_and_later_siblings(make_supervis
 # ---------------------------------------------------------------------------
 
 
-async def test_6_5_intensity_under_limit_keeps_supervisor_alive(make_supervisor) -> None:
+async def test_6_5_intensity_under_limit_keeps_supervisor_alive(
+    make_supervisor,
+) -> None:
     """SPEC §6.5: Restarts within max_restarts threshold keep the supervisor alive.
 
     Source: https://www.erlang.org/doc/apps/stdlib/supervisor.html §"Tuning"
@@ -497,7 +524,9 @@ async def test_6_6_brutal_kill_terminates_child_immediately(make_supervisor) -> 
     """
     sup = await make_supervisor()
     child = await sup.start_child(
-        sup.child_spec("worker", SlowStopServer, restart="temporary", shutdown="brutal_kill")
+        sup.child_spec(
+            "worker", SlowStopServer, restart="temporary", shutdown="brutal_kill"
+        )
     )
 
     await sup.terminate_child("worker")
@@ -521,7 +550,9 @@ async def test_6_6_brutal_kill_skips_terminate_callback(make_supervisor) -> None
 
     sup = await make_supervisor()
     child = await sup.start_child(
-        sup.child_spec("worker", ObservedTerminate, restart="temporary", shutdown="brutal_kill")
+        sup.child_spec(
+            "worker", ObservedTerminate, restart="temporary", shutdown="brutal_kill"
+        )
     )
 
     await sup.terminate_child("worker")
@@ -559,9 +590,15 @@ async def test_6_7_children_shutdown_in_reverse_start_order(make_supervisor) -> 
     """
     OrderObserver.reset()
     sup = await make_supervisor()
-    await sup.start_child(sup.child_spec("a", LabeledBoom, args=("a",), restart="temporary"))
-    await sup.start_child(sup.child_spec("b", LabeledBoom, args=("b",), restart="temporary"))
-    await sup.start_child(sup.child_spec("c", LabeledBoom, args=("c",), restart="temporary"))
+    await sup.start_child(
+        sup.child_spec("a", LabeledBoom, args=("a",), restart="temporary")
+    )
+    await sup.start_child(
+        sup.child_spec("b", LabeledBoom, args=("b",), restart="temporary")
+    )
+    await sup.start_child(
+        sup.child_spec("c", LabeledBoom, args=("c",), restart="temporary")
+    )
 
     await sup.stop("normal")
 

@@ -134,7 +134,7 @@ await server.call(request, sender: Process | None = None, timeout=5) -> Any
 server.cast(request, sender: Process | None = None)           # sync call, not awaitable
 ```
 
-`sender` defaults to the current process (via `_current_process` ContextVar) or the supervisor. `call` raises `TimeoutError` on timeout and re-raises any exception thrown inside `handle_call`.
+`sender` defaults to the current process (via `current_process` ContextVar) or the supervisor. `call` raises `TimeoutError` on timeout and re-raises any exception thrown inside `handle_call`.
 
 ### Deferred reply — `handle_call` returning `None`
 
@@ -490,7 +490,7 @@ await task.shutdown(timeout=5)
 
 ```python
 tsup = await TaskSupervisor.start()
-task = await tsup.async_(compute, arg1, arg2, kwarg=value)   # primary name
+task = await tsup.run(compute, arg1, arg2, kwarg=value)   # primary name
 task = await tsup.run(compute, arg1, arg2, kwarg=value)      # backward-compat alias
 result = await task
 ```

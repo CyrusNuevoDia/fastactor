@@ -520,9 +520,9 @@ class GenStateMachine(Process):
         *,
         metadata: dict[str, t.Any] | None = None,
     ) -> t.Any:
-        from .runtime import _current_process
+        from .runtime import current_process
 
-        sender = sender or _current_process.get() or self.supervisor
+        sender = sender or current_process.get() or self.supervisor
         if telemetry.is_enabled():
             with telemetry.get_tracer().start_as_current_span(
                 "fastactor.gen_state_machine.call",
@@ -547,7 +547,7 @@ class GenStateMachine(Process):
         *,
         metadata: dict[str, t.Any] | None = None,
     ) -> None:
-        from .runtime import _current_process
+        from .runtime import current_process
 
-        sender = sender or _current_process.get() or self.supervisor
+        sender = sender or current_process.get() or self.supervisor
         self.send_nowait(Cast(sender, request, metadata=metadata))

@@ -264,9 +264,9 @@ async def handle_call(self, call: Call):
         return {"error": str(e)}        # caller gets the dict, server does NOT crash
 ```
 
-### `_current_process` ContextVar powers the default `sender`
+### `current_process` ContextVar powers the default `sender`
 
-Inside a callback, `_current_process` is set to the handling process. `server.call(req)` from inside `handle_info` defaults `sender` to `self`. You almost never override this manually — but know it's there when debugging messages that appear to come from `None`.
+Inside a callback, `current_process` is set to the handling process. `server.call(req)` from inside `handle_info` defaults `sender` to `self`. You almost never override this manually — but know it's there when debugging messages that appear to come from `None`.
 
 ### Normal exit reasons are a whitelist
 
@@ -368,7 +368,7 @@ src/fastactor/
     ├── registry.py                     # Registry, AlreadyRegistered
     ├── agent.py                        # Agent
     ├── task.py                         # Task, TaskSupervisor
-    └── runtime.py                      # Runtime, RuntimeSupervisor, whereis, _current_process ContextVar
+    └── runtime.py                      # Runtime, RuntimeSupervisor, whereis, current_process ContextVar
 
 src/tests/
 ├── README.md                           # testing patterns, fixtures, doubles

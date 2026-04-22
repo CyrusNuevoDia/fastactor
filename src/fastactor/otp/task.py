@@ -2,7 +2,7 @@
 
 `Task.start(fn)` = Elixir's `Task.async_nolink` (caller survives a crash).
 `Task.start_link(fn)` = Elixir's `Task.async` (crash cascades via link).
-`TaskSupervisor.async_(fn, ...)` spawns pooled tasks. See
+`TaskSupervisor.run(fn, ...)` spawns pooled tasks. See
 `src/fastactor/otp/README.md#task--tasksupervisor`.
 """
 
@@ -56,7 +56,11 @@ class Task[R](Process):
             self._run_scope = None
             self._done.set()
             await self.terminate(reason)
-            self._stopped.set()
+            try:
+                await self._system_teardown(reason)
+            finally:
+                self._stopped.set()
+                self._started.set()
 
     def __await__(self):
         return self._resolve().__await__()
@@ -127,6 +131,24 @@ class Task[R](Process):
         self._run_scope.cancel()
         await self.stopped()
 
+    @classmethod
+    async def start[T](  # type: ignore[override]
+        cls,
+        fn: t.Callable[..., t.Awaitable[T]],
+        *args,
+        **kwargs,
+    ) -> "Task[T]":
+        return t.cast("Task[T]", await cls._spawn(fn, *args, link=False, **kwargs))
+
+    @classmethod
+    async def start_link[T](  # type: ignore[override]
+        cls,
+        fn: t.Callable[..., t.Awaitable[T]],
+        *args,
+        **kwargs,
+    ) -> "Task[T]":
+        return t.cast("Task[T]", await cls._spawn(fn, *args, link=True, **kwargs))
+
 
 @dataclass(repr=False, eq=False)
 class TaskSupervisor(DynamicSupervisor):
@@ -183,26 +205,24 @@ class TaskSupervisor(DynamicSupervisor):
             **kwargs,
         )
 
-    async def async_(self, fn, *args, **kwargs) -> Task:
-        """Spawn an async function as a supervised Task. Mirrors Elixir's Task.Supervisor.async/2.
-
-        The trailing underscore in the name is because `async` is a reserved Python keyword.
-        """
+    async def run[R](
+        self,
+        fn: t.Callable[..., t.Awaitable[R]],
+        *args,
+        **kwargs,
+    ) -> Task[R]:
+        """Spawn an async function as a supervised Task. Mirrors Elixir's Task.Supervisor.async/2."""
         started = Event()
 
-        async def runner():
+        async def runner() -> R:
             await started.wait()
             return await fn(*args, **kwargs)
 
-        spec: ChildSpec[Task] = ChildSpec(
+        spec: ChildSpec[Task[R]] = ChildSpec(
             id="",
             start=(Task, (runner,), {}),
             restart="temporary",
         )
-        task = t.cast(Task, await self.start_child(spec))
+        task = t.cast("Task[R]", await self.start_child(spec))
         started.set()
         return task
-
-    async def run(self, fn, *args, **kwargs) -> Task:
-        """Backward-compatible alias for `async_`."""
-        return await self.async_(fn, *args, **kwargs)
