@@ -15,8 +15,7 @@ from typing import cast
 import anyio
 import pytest
 
-from fastactor.otp import Call, DynamicSupervisor, GenServer
-
+from fastactor.otp import Call, DynamicSupervisor, GenServer, Supervisor
 
 pytestmark = pytest.mark.anyio
 
@@ -66,7 +65,7 @@ async def _spawn_pool(
     )
     for i in range(size):
         await dsup.start_child(
-            dsup.child_spec(
+            Supervisor.child_spec(
                 f"w-{i}",
                 Worker,
                 kwargs={"label": f"w-{i}", "latency": latency, "completed": completed},

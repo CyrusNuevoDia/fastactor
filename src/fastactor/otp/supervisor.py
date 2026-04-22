@@ -1,8 +1,17 @@
+"""Supervisor — OTP-style restart policies with `ChildSpec`-driven children.
+
+Strategies: `one_for_one`, `one_for_all`, `rest_for_one`. Restart types:
+`permanent` / `transient` / `temporary`. Shutdown types: int seconds, `"infinity"`,
+`"brutal_kill"`. Restart intensity capped by `max_restarts` / `max_seconds`.
+See `src/fastactor/otp/README.md#supervisor` for the full API and tuple-form
+child-spec shortcut.
+"""
+
+import typing as t
 from collections import deque
 from dataclasses import dataclass, field
 from inspect import iscoroutinefunction
 from time import monotonic
-import typing as t
 
 from anyio import (
     BrokenResourceError,
@@ -12,14 +21,16 @@ from anyio import (
 )
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
-from sorcery import dict_of
 
-from ._exceptions import Failed, _is_normal_shutdown_reason
+from fastactor import telemetry
+from fastactor.settings import settings
+
+from ._exceptions import Failed, is_normal_shutdown_reason
 from ._messages import Stop
 from .process import Process
 
 RestartType = t.Literal["permanent", "transient", "temporary"]
-ShutdownType = int | t.Literal["brutal_kill", "infinity"]
+ShutdownType = float | t.Literal["brutal_kill", "infinity"]
 RestartStrategy = t.Literal["one_for_one", "one_for_all", "rest_for_one"]
 
 
@@ -28,10 +39,8 @@ class ChildSpec[P: Process = Process]:
     id: str
     start: tuple[t.Callable[..., t.Any], tuple, dict]
     restart: RestartType = "permanent"
-    shutdown: ShutdownType = 5000
+    shutdown: ShutdownType = settings.call_timeout
     type: t.Literal["worker", "supervisor"] = "worker"
-    modules: list[t.Any] = field(default_factory=list)
-    significant: bool = False
 
 
 @dataclass
@@ -62,12 +71,34 @@ def _normalize_child_spec(spec: "ChildSpec | tuple") -> ChildSpec:
     raise TypeError(f"Unsupported child spec: {spec!r}")
 
 
+def _build_child_spec[P: Process](
+    child_id: str,
+    func_or_class: type[P] | t.Callable[..., t.Awaitable[P]],
+    args: tuple | None,
+    kwargs: dict | None,
+    restart: RestartType,
+    shutdown: ShutdownType,
+    type: t.Literal["worker", "supervisor"],
+) -> ChildSpec[P]:
+    if not hasattr(func_or_class, "start_link") and not iscoroutinefunction(
+        func_or_class
+    ):
+        raise ValueError("Child must be a coroutine or have a start_link method")
+    return ChildSpec(
+        id=child_id,
+        start=(func_or_class, args or tuple(), kwargs or {}),
+        restart=restart,
+        shutdown=shutdown,
+        type=type,
+    )
+
+
 @dataclass(repr=False, eq=False)
 class Supervisor(Process):
     trap_exits: bool = True
     strategy: RestartStrategy = "one_for_one"
-    max_restarts: int = 3
-    max_seconds: float = 5.0
+    max_restarts: int = settings.supervisor_max_restarts
+    max_seconds: float = settings.supervisor_max_seconds
 
     child_specs: dict[str, ChildSpec] = field(default_factory=dict)
     children: dict[str, RunningChild] = field(default_factory=dict, init=False)
@@ -83,45 +114,11 @@ class Supervisor(Process):
         init=False,
     )
 
-    @classmethod
-    async def start(
-        cls,
-        *args,
-        trap_exits=True,
-        supervisor: "Supervisor | None" = None,
-        name: str | None = None,
-        **kwargs,
-    ) -> t.Self:
-        return await super().start(
-            *args,
-            trap_exits=trap_exits,
-            supervisor=supervisor,
-            name=name,
-            **kwargs,
-        )
-
-    @classmethod
-    async def start_link(
-        cls,
-        *args,
-        trap_exits=True,
-        supervisor: "Supervisor | None" = None,
-        name: str | None = None,
-        **kwargs,
-    ) -> t.Self:
-        return await super().start_link(
-            *args,
-            trap_exits=trap_exits,
-            supervisor=supervisor,
-            name=name,
-            **kwargs,
-        )
-
     async def init(
         self,
         strategy: RestartStrategy = "one_for_one",
-        max_restarts: int = 3,
-        max_seconds: float = 5.0,
+        max_restarts: int = settings.supervisor_max_restarts,
+        max_seconds: float = settings.supervisor_max_seconds,
         children: list | None = None,
     ):
         self.strategy = strategy
@@ -141,10 +138,6 @@ class Supervisor(Process):
             for child_id, _ in reversed(self._ordered_child_specs())
             if child_id in self.children
         ]
-        ordered_id_set = set(ordered_ids)
-        ordered_ids.extend(
-            child_id for child_id in self.children if child_id not in ordered_id_set
-        )
 
         for child_id in ordered_ids:
             running_child = self.children.get(child_id)
@@ -159,13 +152,25 @@ class Supervisor(Process):
         self.children.clear()
         await super().terminate(reason)
 
-    def _record_restart(self, restart_times: deque[float]):
+    async def _record_restart(
+        self, restart_times: deque[float], spec_id: str | None = None
+    ):
         now = monotonic()
         restart_times.append(now)
         while restart_times and now - restart_times[0] > self.max_seconds:
             restart_times.popleft()
         if len(restart_times) > self.max_restarts:
+            await self._emit(
+                "child:restart_exceeded",
+                spec_id=spec_id,
+                restart_count=len(restart_times),
+            )
             raise Failed("Max restart intensity reached")
+        await self._emit(
+            "child:restarted",
+            spec_id=spec_id,
+            restart_count=len(restart_times),
+        )
 
     def _should_restart(self, reason: t.Any, spec: ChildSpec) -> bool:
         match spec.restart:
@@ -174,7 +179,7 @@ class Supervisor(Process):
             case "temporary":
                 return False
             case "transient":
-                return not _is_normal_shutdown_reason(reason)
+                return not is_normal_shutdown_reason(reason)
             case _:
                 raise ValueError(f"Invalid restart {spec.restart}")
 
@@ -187,8 +192,13 @@ class Supervisor(Process):
         if proc.has_stopped():
             return
 
+        spec_id = self._spec_id_for(proc)
+
         if shutdown == "brutal_kill":
             await proc.kill()
+            await self._emit(
+                "child:terminated", child=proc, spec_id=spec_id, reason="killed"
+            )
             return
 
         timeout = None if shutdown == "infinity" else shutdown
@@ -198,6 +208,13 @@ class Supervisor(Process):
             await proc.kill()
         except BrokenResourceError:
             await proc.stopped()
+        await self._emit("child:terminated", child=proc, spec_id=spec_id, reason=reason)
+
+    def _spec_id_for(self, proc: Process) -> str | None:
+        for child_id, running in self.children.items():
+            if running.process is proc:
+                return child_id
+        return None
 
     async def _start_child_process(self, spec: ChildSpec) -> Process:
         func, args, kwargs = spec.start
@@ -209,22 +226,37 @@ class Supervisor(Process):
         else:
             assert False, f"ChildSpec {spec.id}: start[0] not callable {func}"
 
+        await self._emit("child:started", child=proc, spec_id=spec.id)
         return proc
 
     async def _run_child(self, child_id: str, spec: ChildSpec, ready: Event):
         restart_times: deque[float] = deque()
 
         while True:
-            proc = await self._start_child_process(spec)
+            if restart_times and telemetry.is_enabled():
+                attrs: dict[str, t.Any] = {
+                    telemetry.ATTR_SUPERVISOR_NAME: self.id,
+                    telemetry.ATTR_CHILD_ID: child_id,
+                    telemetry.ATTR_RESTART_COUNT: len(restart_times),
+                    telemetry.ATTR_RESTART_STRATEGY: self.strategy,
+                }
+                with telemetry.get_tracer().start_as_current_span(
+                    "fastactor.supervisor.restart_child",
+                    attributes=attrs,
+                ) as span:
+                    try:
+                        proc = await self._start_child_process(spec)
+                    except BaseException as err:
+                        telemetry.record_exception(span, err)
+                        raise
+            else:
+                proc = await self._start_child_process(spec)
             self.children[child_id] = RunningChild(proc, spec)
             ready.set()
 
             await proc.stopped()
             reason = proc._crash_exc or "normal"
-            if self.children.get(child_id, None) == RunningChild(proc, spec):
-                self.children.pop(child_id, None)
-            else:
-                self.children.pop(child_id, None)
+            self.children.pop(child_id, None)
 
             if self._terminating:
                 break
@@ -233,7 +265,7 @@ class Supervisor(Process):
                 break
 
             try:
-                self._record_restart(restart_times)
+                await self._record_restart(restart_times, spec_id=child_id)
             except Failed as error:
                 self._fail_supervisor(error)
                 break
@@ -425,7 +457,7 @@ class Supervisor(Process):
                 continue
 
             try:
-                self._record_restart(restart_times)
+                await self._record_restart(restart_times, spec_id=child_id)
             except Failed as error:
                 self._fail_supervisor(error)
                 return
@@ -487,7 +519,7 @@ class Supervisor(Process):
                 continue
 
             try:
-                self._record_restart(restart_times)
+                await self._record_restart(restart_times, spec_id=child_id)
             except Failed as error:
                 self._fail_supervisor(error)
                 return
@@ -508,34 +540,59 @@ class Supervisor(Process):
                 reason="rest_for_one_restart",
             )
 
+    @staticmethod
+    def _unwrap_exception_group(error: Exception) -> Exception:
+        current: BaseException = error
+        while isinstance(current, BaseExceptionGroup) and len(current.exceptions) == 1:
+            current = current.exceptions[0]
+        return current if isinstance(current, Exception) else error
+
     async def loop(self, *args, **kwargs):
-        await self._init(*args, **kwargs)
-        async with create_task_group() as task_group:
-            self._task_group = task_group
+        if not await self._run_init_safe(*args, **kwargs):
+            return
 
-            if self.strategy == "one_for_one":
-                await self._one_for_one()
-            elif self.strategy == "one_for_all":
-                (
-                    self._strategy_updates_send,
-                    self._strategy_updates_receive,
-                ) = create_memory_object_stream(100)
-                await self._start_strategy_children(self._ordered_child_specs())
-                task_group.start_soon(self._one_for_all)
-            elif self.strategy == "rest_for_one":
-                (
-                    self._strategy_updates_send,
-                    self._strategy_updates_receive,
-                ) = create_memory_object_stream(100)
-                await self._start_strategy_children(self._ordered_child_specs())
-                task_group.start_soon(self._rest_for_one)
-            else:
-                raise Failed(f"Unsupported strategy {self.strategy}")
+        try:
+            async with create_task_group() as task_group:
+                self._task_group = task_group
 
+                if self.strategy == "one_for_one":
+                    await self._one_for_one()
+                elif self.strategy == "one_for_all":
+                    (
+                        self._strategy_updates_send,
+                        self._strategy_updates_receive,
+                    ) = create_memory_object_stream(100)
+                    await self._start_strategy_children(self._ordered_child_specs())
+                    task_group.start_soon(self._one_for_all)
+                elif self.strategy == "rest_for_one":
+                    (
+                        self._strategy_updates_send,
+                        self._strategy_updates_receive,
+                    ) = create_memory_object_stream(100)
+                    await self._start_strategy_children(self._ordered_child_specs())
+                    task_group.start_soon(self._rest_for_one)
+                else:
+                    raise Failed(f"Unsupported strategy {self.strategy}")
+
+                try:
+                    await super()._loop()
+                finally:
+                    task_group.cancel_scope.cancel()
+        except Exception as error:
+            unwrapped = self._unwrap_exception_group(error)
+            if self.has_stopped():
+                if self._crash_exc is None:
+                    self._crash_exc = unwrapped
+                return
+
+            self._crash_exc = unwrapped
             try:
-                await super()._loop()
+                await self.terminate(unwrapped)
             finally:
-                task_group.cancel_scope.cancel()
+                self._stopped.set()
+                self._started.set()
+        finally:
+            self._task_group = None
 
     def which_children(self) -> list[t.Any]:
         results = []
@@ -544,14 +601,14 @@ class Supervisor(Process):
             if child_id in self.children:
                 child_proc = self.children[child_id].process
             results.append(
-                dict_of(
-                    id=spec.id,
-                    process=child_proc,
-                    restart=spec.restart,
-                    shutdown=spec.shutdown,
-                    type=spec.type,
-                    significant=spec.significant,
-                )
+                {
+                    "id": spec.id,
+                    "process": child_proc,
+                    "restart": spec.restart,
+                    "shutdown": spec.shutdown,
+                    "type": spec.type,
+                    "significant": False,
+                }
             )
         return results
 
@@ -670,29 +727,13 @@ class Supervisor(Process):
         args: tuple | None = None,
         kwargs: dict | None = None,
         restart: RestartType = "permanent",
-        shutdown: ShutdownType = 5,
+        shutdown: ShutdownType | None = None,
         type: t.Literal["worker", "supervisor"] = "worker",
-        modules: list[t.Any] | None = None,
-        significant: bool = False,
     ) -> ChildSpec[P]:
         if not child_id:
             raise ValueError("Child spec must have an id")
-
-        modules = modules or []
-        args = args or tuple()
-        kwargs = kwargs or {}
-
-        if not hasattr(func_or_class, "start_link") and not iscoroutinefunction(
-            func_or_class
-        ):
-            raise ValueError("Child must be a coroutine or have a start_link method")
-
-        return ChildSpec(
-            id=child_id,
-            start=(func_or_class, args, kwargs),
-            restart=restart,
-            shutdown=shutdown,
-            type=type,
-            modules=modules,
-            significant=significant,
+        if shutdown is None:
+            shutdown = "infinity" if type == "supervisor" else settings.call_timeout
+        return _build_child_spec(
+            child_id, func_or_class, args, kwargs, restart, shutdown, type
         )

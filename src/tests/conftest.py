@@ -7,11 +7,15 @@ import pytest
 from anyio import move_on_after
 
 from fastactor.otp import Runtime, Supervisor
+from fastactor.settings import settings
 
 
 TESTS_DIR = Path(__file__).resolve().parent
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
+OTP_DIR = TESTS_DIR / "otp"
+if str(OTP_DIR) not in sys.path:
+    sys.path.insert(0, str(OTP_DIR))
 
 
 @pytest.fixture(autouse=True)
@@ -46,8 +50,8 @@ async def make_supervisor(
     async def factory(
         *,
         strategy: str = "one_for_one",
-        max_restarts: int = 3,
-        max_seconds: float = 5.0,
+        max_restarts: int = settings.supervisor_max_restarts,
+        max_seconds: float = settings.supervisor_max_seconds,
     ) -> Supervisor:
         _ = f"supervisor_{next(ids)}"
         sup = await Supervisor.start(

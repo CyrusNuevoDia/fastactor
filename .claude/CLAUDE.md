@@ -47,6 +47,6 @@ The design mirrors Erlang/OTP concepts layered on anyio primitives. Reading the 
 ### Important invariants to preserve when editing
 
 - `Runtime._current` is a process-global singleton. Entering a second `Runtime()` while one is active raises. Tests rely on the `runtime` fixture in `src/tests/conftest.py` to scope this.
-- A normal stop reason is one of `"normal"`, `"shutdown"`, or `Shutdown(...)`; `_is_normal_shutdown_reason` is the single source of truth — changing what counts as normal ripples through link-cascade behaviour, supervisor restart decisions, and crash-exception propagation.
+- A normal stop reason is one of `"normal"`, `"shutdown"`, or `Shutdown(...)`; `is_normal_shutdown_reason` is the single source of truth — changing what counts as normal ripples through link-cascade behaviour, supervisor restart decisions, and crash-exception propagation.
 - Mailbox capacity comes from `settings.mailbox_size` (overridable via the `FASTACTOR_MAILBOX_SIZE` env var through `pydantic-settings`). `send_nowait` will raise if the mailbox is full — callers that use it (e.g. `Process.stop`, `GenServer.call`/`cast`) are assuming enough headroom.
 - `Process.__hash__` / `__eq__` are by `id` (a ksuid string from `utils.id_generator`). Two `Process` instances with the same id compare equal; link/monitor sets rely on this.

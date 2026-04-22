@@ -1,3 +1,11 @@
+"""Registry — keyed name → process map, `unique` or `duplicate` mode.
+
+Distinct from `Runtime.register_name`, which is for a single global name per
+process. Entries auto-scrub when a process terminates. `dispatch` runs a callback
+per registered process with exceptions logged and swallowed.
+See `src/fastactor/otp/README.md#registry`.
+"""
+
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal

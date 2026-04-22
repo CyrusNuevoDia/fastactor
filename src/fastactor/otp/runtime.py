@@ -1,16 +1,28 @@
-from collections import defaultdict
-from contextvars import ContextVar
-from dataclasses import dataclass, field
-from functools import partial
+"""Runtime — owns the anyio task group, root `Supervisor`, and registries.
+
+Singleton: one Runtime per process. Entry points: `async with Runtime(): ...`,
+`fastactor.run(main)`, or `await Runtime.start() / await rt.stop()`. Also hosts
+the global-name map, `Registry` storage, and `whereis()` lookup. `Runtime`
+keeps a bounded crash log (`CrashRecord`, `recent_crashes`, `crash_counts`).
+See `src/fastactor/otp/README.md` (§Named registration, §Supervisor root).
+"""
+
 import logging
 import signal
 import typing as t
+from collections import defaultdict, deque
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from functools import partial
+from time import monotonic
 
 from anyio import CancelScope, Lock, create_task_group, open_signal_receiver
 from anyio.abc import TaskGroup
+from pyee import EventEmitter
 
-from ._exceptions import Failed
-from ._messages import Exit
+from fastactor.utils import emit_awaited
+
+from ._exceptions import Failed, is_normal_shutdown_reason
 from .process import Process
 from .supervisor import Supervisor
 
@@ -31,12 +43,15 @@ class _RegistryEntry:
     )
 
 
-class RuntimeSupervisor(Supervisor):
-    async def handle_info(self, message: t.Any):
-        logger.info("RuntimeSupervisor: handle_info %s", message)
+@dataclass(frozen=True)
+class CrashRecord:
+    process_id: str
+    reason_class: str
+    reason_repr: str
+    at: float
 
-    async def handle_exit(self, message: Exit):
-        logger.info("RuntimeSupervisor: handle_exit %s", message)
+
+_CRASH_LOG_MAX = 1000
 
 
 @dataclass(repr=False)
@@ -44,9 +59,13 @@ class Runtime:
     _current: t.ClassVar["Runtime | None"] = None
     _lock: t.ClassVar[Lock] = Lock()
 
-    supervisor: RuntimeSupervisor | None = None
+    supervisor: Supervisor | None = None
     _task_group: TaskGroup | None = None
     trap_signals: bool = True
+    telemetry: bool = False
+    _telemetry_uninstrument: t.Callable[[], None] | None = field(
+        default=None, init=False
+    )
 
     registry: dict[str, str] = field(default_factory=dict, init=False)
     _reverse_registry: dict[str, str] = field(default_factory=dict, init=False)
@@ -57,6 +76,14 @@ class Runtime:
         default_factory=lambda: defaultdict(set),
         init=False,
     )
+    _crash_log: deque[CrashRecord] = field(
+        default_factory=lambda: deque(maxlen=_CRASH_LOG_MAX), init=False
+    )
+    _crash_counts: defaultdict[str, int] = field(
+        default_factory=lambda: defaultdict(int), init=False
+    )
+
+    emitter: EventEmitter = field(default_factory=EventEmitter, init=False)
 
     @classmethod
     def current(cls) -> "Runtime":
@@ -70,7 +97,7 @@ class Runtime:
                 raise RuntimeError("Runtime already started")
 
             self._task_group = await create_task_group().__aenter__()
-            self.supervisor = RuntimeSupervisor(trap_exits=True)
+            self.supervisor = Supervisor(trap_exits=True)
             Runtime._current = self
 
             try:
@@ -91,6 +118,15 @@ class Runtime:
             if self.trap_signals:
                 self._task_group.start_soon(self._trap_signals)
 
+            from fastactor.settings import settings
+
+            if self.telemetry or settings.telemetry_enabled:
+                from fastactor import telemetry
+
+                self._telemetry_uninstrument = telemetry.instrument(self)
+
+            self.emitter.on("crashed", self._record_crash)
+            await emit_awaited(self.emitter, "runtime:started", self)
             return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -122,9 +158,16 @@ class Runtime:
                             raise eg.exceptions[0] from None
                         raise
             finally:
+                if self._telemetry_uninstrument is not None:
+                    try:
+                        self._telemetry_uninstrument()
+                    except Exception:
+                        logger.exception("Runtime: telemetry uninstrument failed")
+                    self._telemetry_uninstrument = None
                 Runtime._current = None
                 self.supervisor = None
                 self._task_group = None
+                await emit_awaited(self.emitter, "runtime:stopped", self)
         finally:
             self._lock.release()
 
@@ -153,7 +196,83 @@ class Runtime:
         except NotImplementedError:
             logger.warning("Runtime: signal traps not supported on this platform")
 
+    async def _record_crash(
+        self,
+        proc: Process,
+        *,
+        exc: Exception | None,
+        reason: t.Any,
+    ) -> None:
+        if proc is self.supervisor:
+            return  # don't self-record on our own shutdown
+        if is_normal_shutdown_reason(reason):
+            return
+
+        reason_class = type(reason).__name__
+        record = CrashRecord(
+            process_id=proc.id,
+            reason_class=reason_class,
+            reason_repr=repr(reason),
+            at=monotonic(),
+        )
+        self._crash_log.append(record)
+        self._crash_counts[reason_class] += 1
+
+        await emit_awaited(
+            self.emitter,
+            "runtime:child_crashed",
+            process_id=proc.id,
+            reason=reason,
+            record=record,
+        )
+
+    def recent_crashes(self, n: int = 50) -> list[CrashRecord]:
+        if n <= 0:
+            return []
+        if n >= len(self._crash_log):
+            return list(self._crash_log)
+        return list(self._crash_log)[-n:]
+
+    def crash_counts(self) -> dict[str, int]:
+        return dict(self._crash_counts)
+
+    def total_crashes(self) -> int:
+        return sum(self._crash_counts.values())
+
     async def spawn[P: Process](
+        self,
+        process: P,
+        *args,
+        name: str | None = None,
+        via: tuple[str, t.Any] | None = None,
+        **kwargs,
+    ) -> P:
+        from fastactor import telemetry
+
+        if not telemetry.is_enabled():
+            return await self._spawn_impl(process, *args, name=name, via=via, **kwargs)
+
+        attrs: dict[str, t.Any] = {
+            telemetry.ATTR_PROCESS_ID: process.id,
+            telemetry.ATTR_PROCESS_CLASS: type(process).__name__,
+        }
+        parent = _current_process.get()
+        if parent is not None:
+            attrs[telemetry.ATTR_PARENT_ID] = parent.id
+
+        with telemetry.get_tracer().start_as_current_span(
+            "fastactor.runtime.spawn",
+            attributes=attrs,
+        ) as span:
+            try:
+                return await self._spawn_impl(
+                    process, *args, name=name, via=via, **kwargs
+                )
+            except BaseException as err:
+                telemetry.record_exception(span, err)
+                raise
+
+    async def _spawn_impl[P: Process](
         self,
         process: P,
         *args,
@@ -166,12 +285,15 @@ class Runtime:
         if name is not None and via is not None:
             raise ValueError("Cannot specify both name= and via= when spawning")
         if name is not None and name in self.registry:
-            raise Failed(f"already_started: {name}")
+            existing_proc = self.processes.get(self.registry[name])
+            raise Failed(("already_started", existing_proc))
 
         self._task_group.start_soon(partial(process.loop, **kwargs), *args)
         await process.started()
 
         if process.has_stopped():
+            if process._ignored:
+                return "ignore"  # type: ignore[return-value]
             exc = process._crash_exc
             if exc is not None:
                 raise exc.__cause__ if exc.__cause__ is not None else exc
@@ -185,13 +307,14 @@ class Runtime:
 
             registry_name, key = via
             await Registry.register(registry_name, key, process)
+        await emit_awaited(self.emitter, "process:spawned", process)
         return process
 
     def register(self, proc: Process):
         self.processes[proc.id] = proc
 
-    def unregister(self, proc: Process):
-        self.processes.pop(proc.id, None)
+    async def unregister(self, proc: Process):
+        removed = self.processes.pop(proc.id, None)
 
         if name := self._reverse_registry.get(proc.id):
             self.unregister_name(name)
@@ -213,6 +336,9 @@ class Runtime:
             proc_ids.discard(proc.id)
             if not proc_ids:
                 entry.duplicate.pop(key, None)
+
+        if removed is not None:
+            await emit_awaited(self.emitter, "process:unregistered", proc)
 
     def register_name(self, name: str, proc: Process):
         if existing_name := self._reverse_registry.get(proc.id):
@@ -243,12 +369,6 @@ class Runtime:
             procs = await Registry.lookup(registry_name, key)
             return procs[0] if procs else None
         if proc_id := self.registry.get(name_or_via):
-            return self.processes.get(proc_id)
-        return None
-
-    def where_is(self, name: str) -> Process | None:
-        """Deprecated - use `whereis` instead. Str-only, sync shim."""
-        if proc_id := self.registry.get(name):
             return self.processes.get(proc_id)
         return None
 

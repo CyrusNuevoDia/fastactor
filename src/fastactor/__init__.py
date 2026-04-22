@@ -2,6 +2,7 @@ import typing as t
 
 import anyio
 
+from . import telemetry
 from .otp import Runtime
 from .settings import settings
 
@@ -37,4 +38,5 @@ def run(
 __all__ = [
     "run",
     "settings",
+    "telemetry",
 ]

@@ -1,10 +1,19 @@
-from dataclasses import dataclass, field
+"""Task + TaskSupervisor — one-shot awaitable coroutines, linked or unlinked.
+
+`Task.start(fn)` = Elixir's `Task.async_nolink` (caller survives a crash).
+`Task.start_link(fn)` = Elixir's `Task.async` (crash cascades via link).
+`TaskSupervisor.async_(fn, ...)` spawns pooled tasks. See
+`src/fastactor/otp/README.md#task--tasksupervisor`.
+"""
+
 import typing as t
+from dataclasses import dataclass, field
 
 from anyio import CancelScope, Event, fail_after
 from anyio.lowlevel import checkpoint
 
-from ..utils import id_generator
+from fastactor.utils import id_generator
+
 from .dynamic_supervisor import DynamicSupervisor
 from .process import Process
 from .supervisor import ChildSpec
@@ -136,18 +145,12 @@ class TaskSupervisor(DynamicSupervisor):
         supervisor = supervisor or runtime.supervisor
 
         if supervisor is None:
-            return await Process.start.__func__(
-                cls,
-                *args,
-                trap_exits=trap_exits,
-                supervisor=None,
-                name=name,
-                **kwargs,
+            return await super().start(
+                *args, trap_exits=trap_exits, supervisor=None, name=name, **kwargs
             )
 
         async def starter(*child_args, **child_kwargs) -> t.Self:
-            return await Process.start.__func__(
-                cls,
+            return await super(TaskSupervisor, cls).start(
                 *child_args,
                 trap_exits=trap_exits,
                 supervisor=supervisor,

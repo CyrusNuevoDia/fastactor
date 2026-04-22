@@ -1,11 +1,19 @@
-from dataclasses import replace
-from inspect import iscoroutinefunction
+"""DynamicSupervisor — `one_for_one`-only supervisor with runtime-added children.
+
+Supports `max_children` cap and `extra_arguments` prepended to every child's start
+tuple. Child ids may be `None` (auto-generates `"dyn:<ksuid>"`). Default restart is
+`"temporary"`, not `"permanent"`. See `src/fastactor/otp/README.md#dynamicsupervisor`.
+"""
+
 import typing as t
+from dataclasses import replace
 
 from anyio import create_task_group
 
-from ..utils import id_generator
-from ._exceptions import Crashed, Failed, Shutdown
+from fastactor.settings import settings
+from fastactor.utils import id_generator
+
+from ._exceptions import Failed
 from .process import Process
 from .supervisor import (
     ChildSpec,
@@ -13,6 +21,7 @@ from .supervisor import (
     RestartType,
     ShutdownType,
     Supervisor,
+    _build_child_spec,
     _normalize_child_spec,
 )
 
@@ -20,6 +29,7 @@ _dynamic_child_id = id_generator("dyn")
 
 
 class DynamicSupervisor(Supervisor):
+    # Supervisor uses @dataclass(eq=False) so equality/hashing must be re-established explicitly.
     __eq__ = Process.__eq__
     __hash__ = Process.__hash__
 
@@ -27,56 +37,17 @@ class DynamicSupervisor(Supervisor):
     extra_arguments: tuple = ()
 
     @classmethod
-    async def start(
-        cls,
-        *args,
-        max_children: int | float = float("inf"),
-        extra_arguments: tuple = (),
-        trap_exits: bool = True,
-        supervisor: "Supervisor | None" = None,
-        name: str | None = None,
-        via: tuple[str, t.Any] | None = None,
-        **kwargs,
-    ) -> t.Self:
-        from .runtime import Runtime
-
-        runtime = Runtime.current()
-        supervisor = supervisor or runtime.supervisor
-
-        process = cls(supervisor=supervisor, trap_exits=trap_exits)
-        process.max_children = max_children
-        process.extra_arguments = extra_arguments
-        return await runtime.spawn(process, *args, name=name, via=via, **kwargs)
-
-    @classmethod
-    async def start_link(
-        cls,
-        *args,
-        max_children: int | float = float("inf"),
-        extra_arguments: tuple = (),
-        trap_exits: bool = True,
-        supervisor: "Supervisor | None" = None,
-        name: str | None = None,
-        via: tuple[str, t.Any] | None = None,
-        **kwargs,
-    ) -> t.Self:
-        from .runtime import Runtime
-
-        runtime = Runtime.current()
-        supervisor = supervisor or runtime.supervisor
-
-        process = cls(supervisor=supervisor, trap_exits=trap_exits)
-        process.max_children = max_children
-        process.extra_arguments = extra_arguments
-        if supervisor is not None:
-            process.link(supervisor)
-        return await runtime.spawn(process, *args, name=name, via=via, **kwargs)
+    def _configure_before_spawn(cls, process, kwargs):
+        if "max_children" in kwargs:
+            process.max_children = kwargs.pop("max_children")
+        if "extra_arguments" in kwargs:
+            process.extra_arguments = kwargs.pop("extra_arguments")
 
     async def init(
         self,
         strategy: RestartStrategy = "one_for_one",
-        max_restarts: int = 3,
-        max_seconds: float = 5.0,
+        max_restarts: int = settings.supervisor_max_restarts,
+        max_seconds: float = settings.supervisor_max_seconds,
         children: list | None = None,
     ):
         if strategy != "one_for_one":
@@ -92,12 +63,7 @@ class DynamicSupervisor(Supervisor):
         )
 
     async def loop(self, *args, **kwargs):
-        try:
-            await self._init(*args, **kwargs)
-        except (Crashed, Shutdown) as error:
-            self._crash_exc = error
-            self._started.set()
-            self._stopped.set()
+        if not await self._run_init_safe(*args, **kwargs):
             return
         async with create_task_group() as task_group:
             self._task_group = task_group
@@ -136,26 +102,11 @@ class DynamicSupervisor(Supervisor):
         args: tuple | None = None,
         kwargs: dict | None = None,
         restart: RestartType = "temporary",
-        shutdown: ShutdownType = 5,
+        shutdown: ShutdownType | None = None,
         type: t.Literal["worker", "supervisor"] = "worker",
-        modules: list[t.Any] | None = None,
-        significant: bool = False,
     ) -> ChildSpec[P]:
-        modules = modules or []
-        args = args or tuple()
-        kwargs = kwargs or {}
-
-        if not hasattr(func_or_class, "start_link") and not iscoroutinefunction(
-            func_or_class
-        ):
-            raise ValueError("Child must be a coroutine or have a start_link method")
-
-        return ChildSpec(
-            id=child_id or "",
-            start=(func_or_class, args, kwargs),
-            restart=restart,
-            shutdown=shutdown,
-            type=type,
-            modules=modules,
-            significant=significant,
+        if shutdown is None:
+            shutdown = "infinity" if type == "supervisor" else settings.call_timeout
+        return _build_child_spec(
+            child_id or "", func_or_class, args, kwargs, restart, shutdown, type
         )

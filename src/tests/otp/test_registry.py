@@ -1,8 +1,7 @@
 import pytest
+from support import CounterServer, EchoServer
 
-from support import CounterServer
-
-from fastactor.otp import AlreadyRegistered, Registry
+from fastactor.otp import AlreadyRegistered, Failed, Registry, Runtime
 
 pytestmark = pytest.mark.anyio
 
@@ -123,3 +122,72 @@ async def test_registry_concurrent_unique_register_raises_for_losers():
 
     for proc in procs:
         await proc.stop("normal")
+
+
+# ---------------------------------------------------------------------------
+# §8 Registered names conformance
+# ---------------------------------------------------------------------------
+
+
+async def test_8_1_local_registration_and_lookup(runtime: Runtime) -> None:
+    """SPEC §8.1: Local registration — whereis returns the registered pid.
+
+    Source: https://www.erlang.org/doc/apps/erts/erlang.html#register/2
+    """
+    proc = await EchoServer.start(name="alpha")
+
+    assert await runtime.whereis("alpha") is proc
+
+    await proc.stop("normal")
+
+
+async def test_8_1_duplicate_local_registration_returns_already_started_tuple() -> None:
+    """SPEC §8.1: Attempting to register a name twice returns `{already_started, Pid}`.
+
+    Source: https://www.erlang.org/doc/apps/erts/erlang.html#register/2
+    """
+    first = await EchoServer.start(name="alpha")
+
+    try:
+        await EchoServer.start(name="alpha")
+    except Failed as error:
+        # Erlang exposes the existing pid in the error; port just wraps a string.
+        reason = error.reason
+        assert isinstance(reason, tuple)
+        assert reason[0] == "already_started"
+        assert reason[1] is first
+
+    await first.stop("normal")
+
+
+async def test_8_1_name_becomes_free_after_process_exits(runtime: Runtime) -> None:
+    """SPEC §8.1: When a registered process exits, the name becomes available again.
+
+    Source: https://www.erlang.org/doc/apps/erts/erlang.html#register/2
+    """
+    first = await EchoServer.start(name="beta")
+    await first.stop("normal")
+    await first.stopped()
+
+    assert await runtime.whereis("beta") is None
+
+    second = await EchoServer.start(name="beta")
+    assert await runtime.whereis("beta") is second
+    await second.stop("normal")
+
+
+async def test_8_2_port_native_via_tuple_registers_and_finds_process(
+    runtime: Runtime,
+) -> None:
+    """SPEC §8.2 (port variant): Port's native `via=(registry, key)` tuple routes correctly.
+
+    Documented as a port-native equivalent of `{via, Module, Term}`.
+    Source: https://www.erlang.org/doc/apps/stdlib/gen_server.html#start_link/4
+    """
+    await Registry.new("spec-via", "unique")
+    proc = await EchoServer.start(via=("spec-via", "alpha"))
+
+    assert await Registry.lookup("spec-via", "alpha") == [proc]
+    assert await runtime.whereis(("spec-via", "alpha")) is proc
+
+    await proc.stop("normal")

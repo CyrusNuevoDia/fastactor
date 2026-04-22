@@ -306,9 +306,13 @@ Names are freed when the process terminates.
 
 Runtime defaults are exposed via `pydantic-settings` and can be overridden by environment variables prefixed with `FASTACTOR_`:
 
-| setting        | env var                  | default |
-| -------------- | ------------------------ | ------- |
-| `mailbox_size` | `FASTACTOR_MAILBOX_SIZE` | `1024`  |
+| setting                   | env var                             | default |
+| ------------------------- | ----------------------------------- | ------- |
+| `mailbox_size`            | `FASTACTOR_MAILBOX_SIZE`            | `1024`  |
+| `call_timeout`            | `FASTACTOR_CALL_TIMEOUT`            | `5`     |
+| `stop_timeout`            | `FASTACTOR_STOP_TIMEOUT`            | `60`    |
+| `supervisor_max_restarts` | `FASTACTOR_SUPERVISOR_MAX_RESTARTS` | `3`     |
+| `supervisor_max_seconds`  | `FASTACTOR_SUPERVISOR_MAX_SECONDS`  | `5.0`   |
 
 ```bash
 FASTACTOR_MAILBOX_SIZE=4096 uv run python my_app.py
@@ -316,7 +320,7 @@ FASTACTOR_MAILBOX_SIZE=4096 uv run python my_app.py
 
 ## Prior art
 
-Erlang/OTP and Elixir's `GenServer` / `Supervisor` modules are the direct inspiration. If you have not read ["The Soul of Erlang and Elixir"](https://www.youtube.com/watch?v=JvBT4XBdoUE) or [Designing for Scalability with Erlang/OTP](https://www.oreilly.com/library/view/designing-for-scalability/9781449361556/), both are excellent background for why these primitives are shaped the way they are.
+Erlang/OTP and Elixir's `GenServer` / `Supervisor` modules are the direct inspiration.
 
 ## License
 

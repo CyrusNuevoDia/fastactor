@@ -5,7 +5,7 @@ from typing import Any
 from anyio import Event, fail_after
 from anyio.lowlevel import checkpoint
 
-from fastactor.otp import Call, Cast, Continue, Down, Exit, GenServer, Process
+from fastactor.otp import Call, Cast, Continue, Down, Exit, GenServer, Process, Stop
 
 
 class EchoServer(GenServer):
@@ -133,6 +133,40 @@ class OrderObserver:
     def snapshot(cls) -> list[str]:
         with cls._lock:
             return list(cls._events)
+
+
+class StopInInitServer(GenServer):
+    async def init(self, reason: Any = "boot_failed") -> Stop:
+        return Stop(None, reason)
+
+
+class DeferredReplyServer(GenServer):
+    async def init(self) -> None:
+        self.pending: list[Call] = []
+
+    async def handle_call(self, call: Call) -> None:
+        self.pending.append(call)
+        return None
+
+
+class SelfSender(Process):
+    async def init(self, payload: Any = "ping") -> Continue:
+        self.received: list[Any] = []
+        self._delivered = Event()
+        self._payload = payload
+        return Continue("send-self")
+
+    async def handle_continue(self, term: Any) -> None:
+        await self.send(self._payload)
+
+    async def _handle_message(self, message: Any) -> None:
+        self.received.append(message)
+        self._delivered.set()
+
+    async def await_delivery(self, timeout: float = 2) -> list[Any]:
+        with fail_after(timeout):
+            await self._delivered.wait()
+        return list(self.received)
 
 
 async def await_child_restart(
