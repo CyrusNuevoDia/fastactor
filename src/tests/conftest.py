@@ -1,20 +1,10 @@
 from collections.abc import AsyncIterator, Awaitable, Callable
-from pathlib import Path
-import sys
 
 import pytest
 from anyio import move_on_after
 
 from fastactor.otp import Runtime, Supervisor
 from fastactor.settings import settings
-
-
-TESTS_DIR = Path(__file__).resolve().parent
-if str(TESTS_DIR) not in sys.path:
-    sys.path.insert(0, str(TESTS_DIR))
-OTP_DIR = TESTS_DIR / "otp"
-if str(OTP_DIR) not in sys.path:
-    sys.path.insert(0, str(OTP_DIR))
 
 
 @pytest.fixture(autouse=True)

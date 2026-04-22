@@ -275,10 +275,12 @@ async def test_producer_consumer_cancel_subscription():
     await consumer.subscribe_to(doubler, max_demand=6)
 
     await consumer.await_n(3)
-    snapshot = len(consumer.received)
 
     await doubler.cancel_subscription(sub_id)
-    await sleep(0.2)
+    await sleep(0.05)  # drain events already in consumer's mailbox
+    snapshot = len(consumer.received)
+
+    await sleep(0.15)
 
     assert len(consumer.received) == snapshot
 

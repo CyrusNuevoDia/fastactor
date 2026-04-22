@@ -16,7 +16,7 @@ if t.TYPE_CHECKING:
 
     from opentelemetry.context import Context
     from opentelemetry.metrics import Meter, MeterProvider, Observation
-    from opentelemetry.trace import Tracer, TracerProvider
+    from opentelemetry.trace import Span, Tracer, TracerProvider
 
     from fastactor.otp import Runtime
 
@@ -49,7 +49,7 @@ def _otel_error() -> RuntimeError:
     )
 
 
-def _context_with_span(span: Span) -> "Context":
+def _context_with_span(span: "Span") -> "Context":  # pyright: ignore[reportInvalidTypeForm]
     if set_span_in_context is None:
         raise _otel_error()
     return set_span_in_context(span)

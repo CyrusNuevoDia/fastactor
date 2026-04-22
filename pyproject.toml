@@ -43,8 +43,3 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fastactor"]
-
-[tool.ty.environment]
-# Both e2e and otp expose a `support` module on sys.path. We need otp's
-# support.py to resolve for the tutorial tests, so it comes first.
-extra-paths = ["src/tests", "src/tests/otp", "src/tests/e2e"]

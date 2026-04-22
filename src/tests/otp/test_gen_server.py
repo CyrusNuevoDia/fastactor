@@ -3,7 +3,7 @@ from typing import Any
 import pytest
 from anyio import Event, create_task_group, fail_after, sleep
 from anyio.lowlevel import checkpoint
-from helpers import (
+from .helpers import (
     CounterServer,
     EchoServer,
     MonitorServer,
@@ -717,6 +717,7 @@ async def test_4_9_reply_allows_decoupled_reply_from_later_event() -> None:
         from_ = srv.pending[0]
         gen_server.reply(from_, 42)  # type: ignore[attr-defined]
 
+    reply = None
     async with create_task_group() as tg:
         tg.start_soon(release)
         reply = await srv.call("wait", timeout=2)

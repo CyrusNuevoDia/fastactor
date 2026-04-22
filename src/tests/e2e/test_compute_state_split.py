@@ -12,9 +12,9 @@ failure boundary is declared, not coded.
 # waits elsewhere use `fail_after` + `poll_value`.
 import anyio
 import pytest
-from helpers import await_child_restart
+from ..otp.helpers import await_child_restart
 
-from e2e.helpers import poll_value
+from .helpers import poll_value
 from fastactor.otp import Agent, GenServer, Supervisor, Task
 
 pytestmark = pytest.mark.anyio

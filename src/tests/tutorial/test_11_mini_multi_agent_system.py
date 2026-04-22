@@ -33,7 +33,7 @@ Read the relevant source:
 from typing import Any, cast
 
 import pytest
-from helpers import await_child_restart
+from ..otp.helpers import await_child_restart
 
 from fastactor.otp import (
     Call,

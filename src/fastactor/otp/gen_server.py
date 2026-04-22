@@ -70,7 +70,7 @@ class GenServer[Req = t.Any, Rep = t.Any](Process):
                     f"{init_result!r}"
                 )
 
-    async def init(  # ty: ignore[invalid-method-override]
+    async def init(  # ty: ignore[invalid-method-override]  # type: ignore[override]
         self, *args, **kwargs
     ) -> Ignore | Stop | Continue | tuple[t.Any, int | float] | None:
         return None

@@ -37,7 +37,7 @@ class DynamicSupervisor(Supervisor):
     extra_arguments: tuple = ()
 
     @classmethod
-    def _configure_before_spawn(cls, process, kwargs):
+    def _configure_before_spawn(cls, process: t.Any, kwargs):
         if "max_children" in kwargs:
             process.max_children = kwargs.pop("max_children")
         if "extra_arguments" in kwargs:

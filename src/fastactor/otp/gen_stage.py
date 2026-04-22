@@ -283,6 +283,7 @@ class GenStage(GenServer):
 
         if self._dispatcher is None:
             self._init_dispatcher()
+        assert self._dispatcher is not None
         self._dispatcher.subscribe(sub_id, opts)
 
         await consumer.send(SubscribeAck(self, sub_id, dict(opts)))
@@ -303,6 +304,7 @@ class GenStage(GenServer):
 
         if self._dispatcher is None:
             self._init_dispatcher()
+        assert self._dispatcher is not None
 
         self._dispatcher.ask(sub_id, count)
 
@@ -331,6 +333,7 @@ class GenStage(GenServer):
 
         if self._dispatcher is None:
             self._init_dispatcher()
+        assert self._dispatcher is not None
 
         if not self._producer_subs:
             # No subscribers yet — buffer everything
@@ -547,6 +550,8 @@ class ProducerConsumer[In, Out](GenStage):
         info = self._consumer_subs.pop(sub_id, None)
         if info is None:
             return
+        # Drop any buffered output that was in-flight from this subscription.
+        self._output_buffer.clear()
         try:
             await info.peer.send(Cancel(self, sub_id, reason))
         except Exception:

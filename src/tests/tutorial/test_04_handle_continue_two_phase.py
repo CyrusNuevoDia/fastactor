@@ -27,7 +27,7 @@ Read the relevant source:
 from typing import Any
 
 import pytest
-from helpers import ContinueServer
+from ..otp.helpers import ContinueServer
 
 from fastactor.otp import Call, Continue, GenServer
 

@@ -28,7 +28,7 @@ Read the relevant source:
 import asyncio
 
 import pytest
-from helpers import BoomServer, EchoServer
+from ..otp.helpers import BoomServer, EchoServer
 
 from fastactor.otp import Failed
 

@@ -28,7 +28,7 @@ import anyio
 import pytest
 from anyio import create_task_group
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
-from helpers import BoomServer, CounterServer, EchoServer
+from ..otp.helpers import BoomServer, CounterServer, EchoServer
 
 pytestmark = pytest.mark.anyio
 

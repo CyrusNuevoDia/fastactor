@@ -5,7 +5,7 @@ from typing import Any, cast
 import pytest
 from anyio import fail_after, sleep
 from anyio.lowlevel import checkpoint
-from helpers import (
+from .helpers import (
     BoomServer,
     CounterServer,
     OrderLog,
@@ -33,7 +33,7 @@ class TerminationRecorder(GenServer):
 
 
 class LabeledBoom(BoomServer):
-    async def init(self, label: str, on_init: bool = False) -> None:  # ty: ignore[invalid-method-override]
+    async def init(self, label: str, on_init: bool = False) -> None:  # ty: ignore[invalid-method-override]  # type: ignore[override]
         self.label = label
         await super().init(on_init=on_init)
 

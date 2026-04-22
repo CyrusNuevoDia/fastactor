@@ -7,9 +7,7 @@ from pathlib import Path
 import pytest
 from anyio import Event, fail_after, sleep
 
-TESTS_DIR = Path(__file__).resolve().parent
-if str(TESTS_DIR) not in sys.path:
-    sys.path.insert(0, str(TESTS_DIR))
+from .otp.helpers import BoomServer, EchoServer, await_child_restart
 
 opentelemetry = pytest.importorskip("opentelemetry")
 metrics_api = importlib.import_module("opentelemetry.metrics")
@@ -28,15 +26,11 @@ InMemorySpanExporter = importlib.import_module(
 StatusCode = trace_api.StatusCode
 tel = importlib.import_module("fastactor.telemetry")
 otp = importlib.import_module("fastactor.otp")
-helpers = importlib.import_module("helpers")
 Call = otp.Call
 Continue = otp.Continue
 GenServer = otp.GenServer
 Runtime = otp.Runtime
 Supervisor = otp.Supervisor
-BoomServer = helpers.BoomServer
-EchoServer = helpers.EchoServer
-await_child_restart = helpers.await_child_restart
 
 
 pytestmark = pytest.mark.anyio

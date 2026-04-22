@@ -32,7 +32,7 @@ Read the relevant source:
 """
 
 import pytest
-from helpers import CounterServer
+from ..otp.helpers import CounterServer
 
 from fastactor.otp import Registry, whereis
 

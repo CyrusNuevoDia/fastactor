@@ -11,7 +11,7 @@ resources dangling.
 import anyio
 import pytest
 
-from e2e.helpers import AgentReply, Ask, FakeAgent, poll_value
+from .helpers import AgentReply, Ask, FakeAgent, poll_value
 from fastactor.otp import Call, DynamicSupervisor, GenServer
 
 pytestmark = pytest.mark.anyio

@@ -3,7 +3,7 @@ from time import monotonic
 import pytest
 from anyio import Event, fail_after, sleep
 from anyio.lowlevel import checkpoint
-from helpers import BoomServer, LinkServer, MonitorServer, OrderLog
+from .helpers import BoomServer, LinkServer, MonitorServer, OrderLog
 
 from fastactor.otp import (
     Call,

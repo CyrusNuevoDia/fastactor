@@ -50,7 +50,7 @@ from typing import cast
 from anyio import fail_after
 from anyio.lowlevel import checkpoint
 import pytest
-from helpers import BoomServer, CounterServer, await_child_restart
+from ..otp.helpers import BoomServer, CounterServer, await_child_restart
 
 pytestmark = pytest.mark.anyio
 
