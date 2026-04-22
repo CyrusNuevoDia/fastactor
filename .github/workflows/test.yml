@@ -1,4 +1,4 @@
-name: Tests
+name: test
 
 on:
   push:
@@ -11,19 +11,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install uv
+      - name: setup[uv]
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
 
-      - name: Set up Python
+      - name: setup[python]
         run: uv python install 3.13
 
-      - name: Install dependencies
+      - name: uv[sync]
         run: uv sync --locked
 
-      - name: Lint
+      - name: lint
         run: uv run ruff check src
 
-      - name: Run tests
+      - name: format
+        run: uv run ruff format --check src
+
+      - name: test
         run: uv run pytest src
