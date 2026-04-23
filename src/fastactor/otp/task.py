@@ -9,7 +9,7 @@
 import typing as t
 from dataclasses import dataclass, field
 
-from anyio import CancelScope, Event, fail_after
+from anyio import CancelScope, Event, fail_after, move_on_after
 from anyio.lowlevel import checkpoint
 
 from fastactor.utils import id_generator
@@ -76,13 +76,11 @@ class Task[R](Process):
             raise self._result
         return t.cast(R, self._result)
 
-    async def yield_(self, timeout: float | None = None) -> R | Exception | None:
+    async def poll(self, timeout: float | None = None) -> R | Exception | None:
         """Poll for the task's result with a timeout, without raising on crash.
 
         Returns the result on success, the exception object on crash, or None on timeout.
         """
-        from anyio import move_on_after
-
         with move_on_after(timeout):
             await self._done.wait()
 

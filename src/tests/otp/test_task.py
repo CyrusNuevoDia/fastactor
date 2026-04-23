@@ -74,18 +74,18 @@ async def test_task_supervisor_run_returns_awaitable_task():
     await sup.stop("normal")
 
 
-async def test_task_yield_tri_state():
-    """G: Task.yield_. W: we poll before completion, after completion, and on crash. T: it returns None, the result, and the exception object."""
+async def test_task_poll_tri_state():
+    """G: Task.poll. W: we poll before completion, after completion, and on crash. T: it returns None, the result, and the exception object."""
     gate = Event()
     slow = await Task.start(lambda: wait_forever(gate))
 
-    assert await slow.yield_(timeout=0) is None
+    assert await slow.poll(timeout=0) is None
 
     gate.set()
-    assert await slow.yield_(timeout=1) == "released"
+    assert await slow.poll(timeout=1) == "released"
 
     crasher = await Task.start(raise_error)
-    result = await crasher.yield_(timeout=1)
+    result = await crasher.poll(timeout=1)
 
     assert isinstance(result, RuntimeError)
     assert "task boom" in str(result)

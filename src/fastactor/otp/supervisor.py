@@ -26,7 +26,7 @@ from fastactor import telemetry
 from fastactor.settings import settings
 
 from ._exceptions import Failed, is_normal_shutdown_reason
-from ._messages import Stop
+from ._messages import Stop, _pid_of
 from .process import Process
 
 RestartType = t.Literal["permanent", "transient", "temporary"]
@@ -323,7 +323,7 @@ class Supervisor(Process):
             return
 
         try:
-            self.send_nowait(Stop(self, reason))
+            self.send_nowait(Stop(sender_id=_pid_of(self), reason=reason))
         except BrokenResourceError:
             pass
 

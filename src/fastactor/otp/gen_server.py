@@ -19,7 +19,7 @@ from fastactor import telemetry
 from fastactor.settings import settings
 
 from ._exceptions import Crashed, Failed, Shutdown
-from ._messages import Call, Cast, Continue, Ignore, Info, Stop
+from ._messages import Call, Cast, Continue, Ignore, Info, Stop, _pid_of
 from .process import Process
 
 logger = logging.getLogger(__name__)
@@ -96,7 +96,7 @@ class GenServer[Req = t.Any, Rep = t.Any](Process):
         with move_on_after(timeout) as scope:
             return await self._mailbox.receive()
         if scope.cancelled_caught:
-            return Info(self.supervisor, "timeout")
+            return Info(sender_id=_pid_of(self.supervisor), message="timeout")
         # Should not be reached; satisfy type checker
         return await self._mailbox.receive()  # pragma: no cover
 
@@ -140,7 +140,7 @@ class GenServer[Req = t.Any, Rep = t.Any](Process):
         if self.has_stopped():
             raise Failed("noproc")
 
-        sender = sender or current_process.get() or self.supervisor
+        caller = sender or current_process.get() or self.supervisor
 
         if telemetry.is_enabled():
             with telemetry.get_tracer().start_as_current_span(
@@ -148,22 +148,15 @@ class GenServer[Req = t.Any, Rep = t.Any](Process):
                 attributes=self._telemetry_attrs(timeout=timeout),
             ) as span:
                 try:
-                    callmsg: Call[Req, Rep] = Call(sender, request, metadata=metadata)
-                    try:
-                        self.send_nowait(callmsg)
-                    except (BrokenResourceError, ClosedResourceError):
-                        raise Failed("noproc")
-                    return await callmsg.result(timeout)
+                    return t.cast(
+                        Rep,
+                        await self._perform_call(request, caller, timeout, metadata),
+                    )
                 except BaseException as error:
                     telemetry.record_exception(span, error)
                     raise
 
-        callmsg = Call(sender, request, metadata=metadata)
-        try:
-            self.send_nowait(callmsg)
-        except (BrokenResourceError, ClosedResourceError):
-            raise Failed("noproc")
-        return await callmsg.result(timeout)
+        return t.cast(Rep, await self._perform_call(request, caller, timeout, metadata))
 
     def cast(
         self,
@@ -176,7 +169,9 @@ class GenServer[Req = t.Any, Rep = t.Any](Process):
 
         sender = sender or current_process.get() or self.supervisor
         try:
-            self.send_nowait(Cast(sender, request, metadata=metadata))
+            self.send_nowait(
+                Cast(sender_id=_pid_of(sender), message=request, metadata=metadata)
+            )
         except (BrokenResourceError, ClosedResourceError):
             pass
 
@@ -185,7 +180,7 @@ class GenServer[Req = t.Any, Rep = t.Any](Process):
             reply = await self.handle_call(message)
             match reply:
                 case None:
-                    pass
+                    pass  # deferred — user code will call reply() later
                 case (value, Continue() as continuation):
                     self._set_pending_continue(continuation)
                     message.set_result(value)

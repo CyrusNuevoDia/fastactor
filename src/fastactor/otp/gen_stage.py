@@ -27,7 +27,7 @@ from typing import AsyncGenerator, ClassVar, Literal
 
 from fastactor.utils import id_generator
 
-from ._messages import Cancel, Demand, Events, Subscribe, SubscribeAck
+from ._messages import Cancel, Demand, Events, Subscribe, SubscribeAck, _pid_of
 from .gen_server import GenServer
 from .process import Process
 
@@ -286,7 +286,13 @@ class GenStage(GenServer):
         assert self._dispatcher is not None
         self._dispatcher.subscribe(sub_id, opts)
 
-        await consumer.send(SubscribeAck(self, sub_id, dict(opts)))
+        await consumer.send(
+            SubscribeAck(
+                sender_id=_pid_of(self),
+                subscription_id=sub_id,
+                opts=dict(opts),
+            )
+        )
         logger.debug("%s accepted subscription %s from %s", self, sub_id, consumer)
 
         # If we have buffered output, try dispatching now that there is a new subscriber
@@ -352,7 +358,13 @@ class GenStage(GenServer):
             if info is None:
                 continue
             try:
-                await info.peer.send(Events(self, sub_id, batch))
+                await info.peer.send(
+                    Events(
+                        sender_id=_pid_of(self),
+                        subscription_id=sub_id,
+                        events=batch,
+                    )
+                )
             except Exception as exc:
                 logger.error("%s failed sending events to %s: %r", self, info.peer, exc)
 
@@ -407,7 +419,13 @@ class GenStage(GenServer):
             return
         info.in_flight += count
         try:
-            await info.peer.send(Demand(self, info.sub_id, count))
+            await info.peer.send(
+                Demand(
+                    sender_id=_pid_of(self),
+                    subscription_id=info.sub_id,
+                    count=count,
+                )
+            )
         except Exception as exc:
             logger.error("%s failed sending Demand to %s: %r", self, info.peer, exc)
 
@@ -488,7 +506,13 @@ class Consumer[E](GenStage):
             cancel=cancel,
         )
         self._consumer_subs[sub_id] = info
-        await producer.send(Subscribe(self, sub_id, opts))
+        await producer.send(
+            Subscribe(
+                sender_id=_pid_of(self),
+                subscription_id=sub_id,
+                opts=opts,
+            )
+        )
         return sub_id
 
     async def cancel_subscription(self, sub_id: str, reason: t.Any = "normal") -> None:
@@ -499,7 +523,13 @@ class Consumer[E](GenStage):
         if info is None:
             return
         try:
-            await info.peer.send(Cancel(self, sub_id, reason))
+            await info.peer.send(
+                Cancel(
+                    sender_id=_pid_of(self),
+                    subscription_id=sub_id,
+                    reason=reason,
+                )
+            )
         except Exception:
             pass
 
@@ -541,7 +571,13 @@ class ProducerConsumer[In, Out](GenStage):
             cancel=cancel,
         )
         self._consumer_subs[sub_id] = info
-        await producer.send(Subscribe(self, sub_id, opts))
+        await producer.send(
+            Subscribe(
+                sender_id=_pid_of(self),
+                subscription_id=sub_id,
+                opts=opts,
+            )
+        )
         return sub_id
 
     async def cancel_subscription(self, sub_id: str, reason: t.Any = "normal") -> None:
@@ -553,7 +589,13 @@ class ProducerConsumer[In, Out](GenStage):
         # Drop any buffered output that was in-flight from this subscription.
         self._output_buffer.clear()
         try:
-            await info.peer.send(Cancel(self, sub_id, reason))
+            await info.peer.send(
+                Cancel(
+                    sender_id=_pid_of(self),
+                    subscription_id=sub_id,
+                    reason=reason,
+                )
+            )
         except Exception:
             pass
 

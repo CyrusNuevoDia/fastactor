@@ -1,44 +1,64 @@
 # fastactor
 
-Elixir/OTP-style actors for Python, built on [anyio](https://anyio.readthedocs.io/).
+> **Greenspun's Tenth Rule, actor edition**: any sufficiently complex stateful-agent system built on a task queue contains an ad-hoc, informally-specified, bug-ridden, slow implementation of half of OTP.
 
-`fastactor` mirrors the primitives that make OTP pleasant: a `Process` with a mailbox and lifecycle; a `GenServer` with synchronous `call` and asynchronous `cast`; `Supervisor` with `one_for_one` / `one_for_all` / `rest_for_one` strategies; a `DynamicSupervisor` for runtime-added children; a `Registry` for `unique`/`duplicate` name → process lookup with auto-cleanup; an `Agent` for state-holding workers; `Task` for one-shot awaitable coroutines; plus linking, monitoring, `trap_exits`, `handle_continue`, and named registration at `start()`.
+Reach for this when you have per-entity long-lived state (agents, sessions, game entities, devices), structured failure semantics, or mailbox-shaped back-pressure. Reach for Celery/Dramatiq for stateless tasks, Temporal/Inngest for multi-day workflows, or raw `anyio` channels for data pipelines. Long version: [`writing/why_actors.md`](./writing/why_actors.md).
 
-> **Building against fastactor with a coding agent?** The full API reference — every public class, method, message type, and deterministic-sync testing pattern — is in [`llms.txt`](./llms.txt).
+## Why actors?
+
+Every concurrency model bets on what the fundamental unit should be. Task queues bet on the stateless **task**. Go and `anyio` bet on the **channel**. Temporal/Inngest/etc bets on the durable **workflow**.
+
+Actors bet on the **process** — an addressable, stateful agent with a mailbox, a lifecycle, and a supervisor.
 
 ```python
+from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
 from fastactor.otp import GenServer, Runtime, Call, Cast
 
 
-class Counter(GenServer):
-    count: int
+class Conversation(GenServer):
+    """One per live conversation. Owns a Claude Agent SDK client + sandbox dir."""
 
-    async def init(self, start: int = 0):
-        self.count = start
+    async def init(self, conversation_id: str, workspace: str):
+        self.conversation_id = conversation_id
+        self.client = ClaudeSDKClient(options=ClaudeAgentOptions(cwd=workspace))
+        await self.client.connect()
+
+    async def terminate(self, reason):
+        # The sandbox lifecycle IS the actor lifecycle — no leaks on crash or exit.
+        await self.client.disconnect()
+        await super().terminate(reason)
 
     async def handle_call(self, call: Call):
-        return self.count
+        await self.client.query(call.message)
+        return [msg async for msg in self.client.receive_response()]
 
     async def handle_cast(self, cast: Cast):
-        match cast.message:
-            case ("add", n): self.count += n
-            case ("reset",): self.count = 0
+        if cast.message == "interrupt":
+            await self.client.interrupt()
 
 
 async def main():
     async with Runtime():
-        counter = await Counter.start(start=10)
+        convo = await Conversation.start(
+            conversation_id="conv-abc123",
+            workspace="/tmp/sandboxes/conv-abc123",
+        )
 
-        counter.cast(("add", 5))
-        counter.cast(("add", 2))
-        assert await counter.call(None) == 17
+        chunks = await convo.call("Summarize the repo in a paragraph.")
+        for chunk in chunks:
+            print(chunk)            # render to the user however you like
 
-        await counter.stop()
+        convo.cast("interrupt")     # fire-and-forget from another request handler
+        await convo.stop()          # terminate() closes the SDK + sandbox
 ```
 
-## Status
+The sandbox is bound to the actor's lifetime: `terminate()` runs on any exit — clean stop, crash, supervisor shutdown — so a restarted process gets a fresh sandbox with no cleanup code in your request handlers. Scale this to many live conversations with `DynamicSupervisor` (one `Conversation` per `conversation_id`) and `Registry` (route `"conv-abc123"` → the right live process). The rest of this README walks through how.
 
-Early but green. All three supervisor strategies (`one_for_one`, `one_for_all`, `rest_for_one`) work, the Runtime survives crashes cleanly, and the test suite covers ~92 canonical OTP scenarios — parametrized across restart modes × exit kinds, with deterministic synchronization (no `asyncio.sleep` to wait for state). Treat this as a reference implementation you can fork and hack on, not a production dependency.
+## Why fastactor?
+
+Python's existing actor options are either cluster-oriented (Ray), lightly maintained (Thespian, Pykka), or not really actors (Dramatiq — no mailboxes, no supervision, no addressable state). `fastactor` is an in-process OTP-shaped runtime on `anyio` that you can read end-to-end: a `Process` with a mailbox and lifecycle; a `GenServer` with synchronous `call` and asynchronous `cast`; `Supervisor` with `one_for_one` / `one_for_all` / `rest_for_one` strategies; a `DynamicSupervisor` for runtime-added children; a `Registry` for `unique`/`duplicate` name → process lookup with auto-cleanup; an `Agent` for state-holding workers; `Task` for one-shot awaitable coroutines; plus linking, monitoring, `trap_exits`, `handle_continue`, and named registration at `start()`.
+
+> **Building against fastactor with a coding agent?** The full API reference — every public class, method, message type, and deterministic-sync testing pattern — is in [`llms.txt`](./llms.txt).
 
 ## Install
 
@@ -65,7 +85,7 @@ A `Runtime` owns the anyio task group everything else runs under, a top-level `R
 async with Runtime() as rt:
     proc = await SomeServer.start()
     rt.register_name("some_server", proc)
-    assert rt.where_is("some_server") is proc
+    assert await rt.whereis("some_server") is proc
 ```
 
 #### Entry points
@@ -80,7 +100,7 @@ from fastactor.otp import Runtime
 
 async def main():
     async with Runtime():
-        counter = await Counter.start()
+        convo = await Conversation.start(conversation_id="conv-abc", workspace="/tmp/conv-abc")
         ...
 
 anyio.run(main)
@@ -92,7 +112,7 @@ anyio.run(main)
 import fastactor
 
 async def main():
-    counter = await Counter.start()
+    convo = await Conversation.start(conversation_id="conv-abc", workspace="/tmp/conv-abc")
     ...
 
 fastactor.run(main)   # returns main's return value; absorbs signal-triggered cancellation
@@ -102,7 +122,7 @@ fastactor.run(main)   # returns main's return value; absorbs signal-triggered ca
 
 ```python
 rt = await Runtime.start()
-counter = await Counter.start()
+convo = await Conversation.start(conversation_id="conv-abc", workspace="/tmp/conv-abc")
 # ... do work ...
 await rt.stop()
 ```
@@ -185,13 +205,17 @@ async with Runtime() as rt:
     sup = rt.supervisor                 # the root supervisor
 
     spec = sup.child_spec(
-        "counter",                      # child id
-        Counter,                        # class (must expose start_link) or coroutine
-        kwargs={"start": 0},
-        restart="transient",            # permanent | transient | temporary
+        "housekeeper",                  # child id
+        Housekeeper,                    # class (must expose start_link) or coroutine
+        kwargs={"interval_s": 60},
+        restart="permanent",            # permanent | transient | temporary
         shutdown=5,                     # seconds, "brutal_kill", or "infinity"
     )
-    counter = await sup.start_child(spec)
+    housekeeper = await sup.start_child(spec)
+    # If Housekeeper crashes, the supervisor terminates it cleanly (running
+    # terminate()) and starts a fresh instance under the same id. Callers
+    # holding a reference to the old process get a Down; a registry lookup
+    # returns the new one.
 ```
 
 Restart semantics:
@@ -208,37 +232,51 @@ All three strategies are implemented: `one_for_one` restarts just the failing ch
 
 ### DynamicSupervisor
 
-Children are added at runtime instead of being declared in `child_specs`:
+Children are added at runtime instead of being declared in `child_specs`. This is the right shape for "one actor per live conversation": a new chat thread arrives, a fresh `Conversation` is spawned, later the thread ends or crashes and the slot is reaped.
 
 ```python
 from fastactor.otp import DynamicSupervisor
 
 async with Runtime():
-    pool = await DynamicSupervisor.start(max_children=10, extra_arguments=(shared_config,))
-    worker = await pool.start_child(pool.child_spec(None, Worker, kwargs={"name": "alice"}))
+    conversations = await DynamicSupervisor.start(max_children=1000)
+
+    # Spawn a Conversation on the first message of a new thread. The id
+    # doubles as the registry key below, so routing stays stable across
+    # supervisor-initiated restarts.
+    convo = await conversations.start_child(conversations.child_spec(
+        "conv-abc123", Conversation,
+        kwargs={
+            "conversation_id": "conv-abc123",
+            "workspace": "/tmp/sandboxes/conv-abc123",
+            "via": ("conversations", "conv-abc123"),   # re-register on restart
+        },
+        restart="transient",   # restart on crash, leave dead on normal stop
+    ))
 ```
 
-`max_children` caps the pool; `extra_arguments` are prepended to every child's `start` tuple; ids auto-generate (`dyn:…`) when you pass `None`. Strategy is always `one_for_one`.
+`max_children` caps the pool (back-pressure: hitting the cap raises `Failed` — the caller decides whether to queue, reject, or evict). `extra_arguments` is prepended to every child's `start` args — handy for passing a shared config or a parent handle to every conversation. Strategy is always `one_for_one`.
 
 ### Registry
 
-A name-keyed lookup, separate from `Runtime.register_name` (which is for a single global name per process). `Registry` supports two modes:
+A name-keyed lookup — the "phone book" that lets your request handler find `"conv-abc123"`'s live process without holding a reference. Two modes:
 
-- `unique` — one process per key; re-registering with the same key raises `AlreadyRegistered(pid)`.
+- `unique` — one process per key; re-registering raises `AlreadyRegistered(pid)`.
 - `duplicate` — many processes per key, useful for pub/sub fan-out.
 
 ```python
-from fastactor.otp import Registry
+from fastactor.otp import Registry, whereis
 
-await Registry.new("workers", mode="duplicate")
-await Registry.register("workers", "jobs", worker1)
-await Registry.register("workers", "jobs", worker2)
+await Registry.new("conversations", "unique")
 
-procs = await Registry.lookup("workers", "jobs")   # [worker1, worker2]
-await Registry.dispatch("workers", "jobs", lambda p: p.send(Notify()))
+# The via= kwarg above on Conversation.start means registration happens
+# *inside* init — so a supervisor-restarted replacement re-registers under
+# the same key automatically, with no coordinating code.
+
+convo = await whereis(("conversations", "conv-abc123"))   # -> the live Process
+chunks = await convo.call("Add error handling to the auth module.")
 ```
 
-Entries auto-scrub when a process terminates.
+Entries auto-scrub when the registered process terminates. For broadcast ("notify every live conversation belonging to org X"), use `duplicate` mode + `Registry.dispatch(key, callback)` — exceptions in one callback don't affect peers.
 
 ### Agent
 
@@ -258,45 +296,60 @@ Functions may be sync or async.
 
 ### Task
 
-One-shot awaitable coroutines with crash-propagation semantics:
+One-shot awaitable coroutines with crash-propagation semantics. The shape you reach for when a conversation's turn fans out into N concurrent tool calls and you want isolated failure (one flaky API doesn't cancel the others — unlike `asyncio.gather`).
 
 ```python
 from fastactor.otp import Task, TaskSupervisor
 
-t1 = await Task.start(compute)            # unlinked: caller survives a task crash
-t2 = await Task.start_link(compute)       # linked: caller dies on task crash
-result = await t1                         # __await__ returns result or raises
+tools = await TaskSupervisor.start()
 
-tsup = await TaskSupervisor.start()
-t3 = await tsup.run(compute)
+search = await tools.run(web_search, "erlang otp origin")
+read   = await tools.run(read_file, "/workspace/README.md")
+compute = await tools.run(eval_python, "sum(range(1_000_000))")
+
+results = [await search, await read, await compute]   # each resolves or raises
+
+# t.poll(timeout) is the non-raising variant — returns result, exception, or None.
+outcome = await compute.poll(timeout=5)
 ```
 
-Timeouts are the caller's responsibility: `with fail_after(5): result = await t`.
+A crashing tool raises only when the caller awaits _it_; sibling tools keep running. `Task.start_link(fn)` opts into crash cascade to the caller; `Task.start(fn)` (unlinked) keeps the caller alive. Timeouts are the caller's responsibility: `with fail_after(5): result = await t`.
 
 ### handle_continue
 
-Schedule a follow-up callback without re-entering the mailbox loop. Useful for multi-step init or post-processing:
+Schedule a follow-up callback that runs **before the next mailbox message**. Two shapes:
+
+1. `init` returns `Continue(term)` → `handle_continue(term)` runs before the first message (multi-phase startup).
+2. `handle_call` returns `(reply, Continue(term))` → the caller gets `reply` immediately; `handle_continue` runs next, mailbox still paused.
+
+The "plan, reply, reflect" pattern for agents falls out naturally:
 
 ```python
-from fastactor.otp import Continue
+from fastactor.otp import Call, Continue, GenServer
 
-class Bootstrap(GenServer):
-    async def init(self, db_url):
-        self.db_url = db_url
-        return Continue("load")
+class PlanAndReflect(GenServer):
+    async def init(self):
+        self.reflections: list[str] = []
+
+    async def handle_call(self, call: Call):
+        plan = await llm.generate_plan(call.message)
+        return plan, Continue(("reflect", plan))   # caller gets `plan` now
 
     async def handle_continue(self, term):
-        if term == "load":
-            self.conn = await connect(self.db_url)
+        match term:
+            case ("reflect", plan):
+                # Runs before the next message — so reflection can't interleave
+                # with the next request. The mailbox is your serialization fence.
+                self.reflections.append(await llm.critique(plan))
 ```
 
-`handle_call` can return `(reply, Continue(term))` to piggyback a continuation on a reply.
+Stronger than chaining awaits inside one handler: nothing in the mailbox can interleave between the reply and the continuation.
 
 ### Named registration at start()
 
 ```python
 g = await GenServer.start(name="sessions")
-assert runtime.where_is("sessions") is g
+assert await runtime.whereis("sessions") is g
 # A second start with the same name raises Failed("already_started: sessions")
 ```
 

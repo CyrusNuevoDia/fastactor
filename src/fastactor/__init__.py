@@ -1,3 +1,4 @@
+import asyncio
 import typing as t
 
 import anyio
@@ -8,8 +9,6 @@ from .settings import settings
 
 
 def _is_clean_cancellation(error: BaseException) -> bool:
-    import asyncio
-
     if isinstance(error, asyncio.CancelledError):
         return True
     if isinstance(error, BaseExceptionGroup):

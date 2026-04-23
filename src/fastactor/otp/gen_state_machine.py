@@ -14,8 +14,8 @@ from anyio import (
 from fastactor import telemetry
 from fastactor.settings import settings
 
-from ._exceptions import Crashed, Shutdown, is_normal_shutdown_reason
-from ._messages import Call, Cast, Down, Exit, Info, Stop
+from ._exceptions import Crashed, Failed, Shutdown, is_normal_shutdown_reason
+from ._messages import Call, Cast, Down, Exit, Info, Stop, _pid_of
 from .process import Process
 
 logger = logging.getLogger(__name__)
@@ -291,12 +291,13 @@ class GenStateMachine(Process):
 
     async def _handle_message(self, message: t.Any) -> None:
         match message:
-            case Stop(_, reason):
+            case Stop(reason=reason):
                 raise Shutdown(reason)
-            case Exit(_, reason):
+            case Exit(reason=reason):
                 if not self.trap_exits and not is_normal_shutdown_reason(reason):
-                    if message.sender is not None:
-                        self.unlink(message.sender)
+                    sender = message.sender
+                    if sender is not None:
+                        self.unlink(sender)
                     raise Shutdown(reason)
                 await self.handle_exit(message)
             case Down(ref=ref):
@@ -522,23 +523,23 @@ class GenStateMachine(Process):
     ) -> t.Any:
         from .runtime import current_process
 
-        sender = sender or current_process.get() or self.supervisor
+        if self.has_stopped():
+            raise Failed("noproc")
+
+        caller = sender or current_process.get() or self.supervisor
+
         if telemetry.is_enabled():
             with telemetry.get_tracer().start_as_current_span(
                 "fastactor.gen_state_machine.call",
                 attributes=self._telemetry_attrs(timeout=timeout),
             ) as span:
                 try:
-                    callmsg: Call = Call(sender, request, metadata=metadata)
-                    self.send_nowait(callmsg)
-                    return await callmsg.result(timeout)
+                    return await self._perform_call(request, caller, timeout, metadata)
                 except BaseException as error:
                     telemetry.record_exception(span, error)
                     raise
 
-        callmsg = Call(sender, request, metadata=metadata)
-        self.send_nowait(callmsg)
-        return await callmsg.result(timeout)
+        return await self._perform_call(request, caller, timeout, metadata)
 
     def cast(
         self,
@@ -550,4 +551,6 @@ class GenStateMachine(Process):
         from .runtime import current_process
 
         sender = sender or current_process.get() or self.supervisor
-        self.send_nowait(Cast(sender, request, metadata=metadata))
+        self.send_nowait(
+            Cast(sender_id=_pid_of(sender), message=request, metadata=metadata)
+        )

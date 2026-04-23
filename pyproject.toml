@@ -12,6 +12,7 @@ dependencies = [
     "sorcery>=0.2.2",
     "svix-ksuid>=0.7.0",
     "beartype>=0.22.9",
+    "msgspec>=0.19",
 ]
 readme = "README.md"
 requires-python = ">=3.13"
@@ -20,6 +21,9 @@ requires-python = ">=3.13"
 otel = [
     "opentelemetry-api>=1.27",
     "opentelemetry-sdk>=1.27",
+]
+wire = [
+    "tblib>=3.0",
 ]
 
 [build-system]

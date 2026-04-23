@@ -230,7 +230,7 @@ async def test_init_returning_stop_crashes_with_reason():
 
     class StopEarly(Process):
         async def init(self):
-            return Stop(None, "bad_config")
+            return Stop(sender_id=None, reason="bad_config")
 
     with pytest.raises(Shutdown) as exc_info:
         await StopEarly.start()

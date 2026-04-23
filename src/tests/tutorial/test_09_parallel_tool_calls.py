@@ -24,7 +24,7 @@ automatic and a parent crash tears them down structurally.
 
 Prior lessons: 05 (isolation), 08 (DynamicSupervisor).
 New concepts: `Task.start`, `Task.start_link`, awaiting a Task,
-              `TaskSupervisor.run`, Task.yield_ for non-raising polling.
+              `TaskSupervisor.run`, Task.poll for non-raising polling.
 
 Read the relevant source:
   - src/fastactor/otp/task.py
@@ -121,16 +121,16 @@ async def test_task_supervisor_pools_supervised_tasks():
     await pool.stop("normal")
 
 
-async def test_task_yield_polls_without_raising_on_crash():
-    """G: a Task that crashes. W: we yield_ it with a timeout. T: we get the Exception instance back, not a raise.
+async def test_task_poll_without_raising_on_crash():
+    """G: a Task that crashes. W: we poll it with a timeout. T: we get the Exception instance back, not a raise.
 
-    `task.yield_(timeout)` is the non-raising cousin of `await task`. Useful
+    `task.poll(timeout)` is the non-raising cousin of `await task`. Useful
     when you want to inspect the outcome without unwinding the current frame.
     Returns: the result on success, the exception object on crash, or None
     on timeout.
     """
     task = await Task.start(_tool_boom)
-    outcome = await task.yield_(timeout=1)
+    outcome = await task.poll(timeout=1)
 
     assert isinstance(outcome, RuntimeError)
     assert "tool exploded" in str(outcome)

@@ -20,6 +20,7 @@ from anyio import CancelScope, Lock, create_task_group, open_signal_receiver
 from anyio.abc import TaskGroup
 from pyee import EventEmitter
 
+from fastactor.settings import settings
 from fastactor.utils import emit_awaited
 
 from ._exceptions import Failed, is_normal_shutdown_reason
@@ -117,8 +118,6 @@ class Runtime:
 
             if self.trap_signals:
                 self._task_group.start_soon(self._trap_signals)
-
-            from fastactor.settings import settings
 
             if self.telemetry or settings.telemetry_enabled:
                 from fastactor import telemetry

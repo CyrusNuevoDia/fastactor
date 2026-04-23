@@ -1,120 +1,158 @@
-"""Mailbox message types — `Info`, `Stop`, `Exit`, `Down`, `Call`, `Cast`, `Continue`, `Ignore`, `Subscribe`, `SubscribeAck`, `Cancel`, `Demand`, `Events`.
+"""Mailbox message types and wire-safe envelope helpers."""
 
-All messages carry `sender: Process | None` and optional `metadata`. `Call` also
-carries an Event + result slot for the reply round-trip. `Continue` and `Ignore`
-are control-flow sentinels, not mailbox-delivered.
-See `src/fastactor/otp/README.md#messages-reference`.
-"""
+from __future__ import annotations
 
 import typing as t
-from abc import ABC
-from dataclasses import dataclass, field
 
-from anyio import Event, fail_after
+import msgspec
 
-from fastactor.settings import settings
+from fastactor.utils import id_generator
 
 if t.TYPE_CHECKING:
     from .process import Process
 
 
-@dataclass
-class Message(ABC):
-    sender: "Process | None"
-    metadata: dict[str, t.Any] | None = field(default=None, kw_only=True)
+_call_ref = id_generator("call")
 
 
-@dataclass
-class Info(Message):
+class Pid(msgspec.Struct, frozen=True):
+    """Process identity — local when ``node == ''``, remote otherwise."""
+
+    id: str
+    node: str = ""
+
+    @classmethod
+    def local(cls, id: str) -> "Pid":
+        return cls(id=id)
+
+
+def _pid_of(proc: "Process | None") -> "Pid | None":
+    return Pid.local(proc.id) if proc is not None else None
+
+
+class Message(msgspec.Struct, kw_only=True, tag="base", dict=True):
+    sender_id: "Pid | None" = None
+    metadata: dict[str, t.Any] | None = None
+
+    @property
+    def sender(self) -> "Process | None":
+        # Prefer the strong ref stamped at send time — survives sender death
+        # because Python keeps the Process alive while this message holds it.
+        ref = self.__dict__.get("_sender_ref")
+        if ref is not None:
+            return ref
+        sid = self.sender_id
+        if sid is None or sid.node:
+            return None
+        from .runtime import Runtime
+
+        try:
+            return Runtime.current().processes.get(sid.id)
+        except RuntimeError:
+            return None
+
+
+class Info(Message, tag=True, kw_only=True):
     message: t.Any
 
 
-@dataclass
-class Stop(Message):
+class Stop(Message, tag=True, kw_only=True):
     reason: t.Any
 
 
-@dataclass
-class Exit(Message):
+class Exit(Message, tag=True, kw_only=True):
     reason: t.Any
 
 
-@dataclass
-class Down(Message):
+class Down(Message, tag=True, kw_only=True):
     reason: t.Any
     ref: str | None = None
 
 
-class Ignore:
-    """Used by `Process.init` to skip starting the loop if desired."""
+class Ignore(msgspec.Struct, tag=True):
+    """Used by ``Process.init`` to skip starting the loop if desired."""
 
 
-@dataclass
-class Continue:
+class Continue(msgspec.Struct, tag=True):
     term: t.Any
 
 
-@dataclass
-class Call[Req = t.Any, Res = t.Any](Message):
+class Call[Req = t.Any, Res = t.Any](Message, tag=True, kw_only=True):
     message: Req
-    _result: Res | Exception | None = field(default=None, init=False)
-    _ready: Event = field(default_factory=Event, init=False, repr=False)
+    ref: str
 
     def set_result(self, value: Res | Exception) -> None:
-        self._result = value
-        self._ready.set()
-
-    async def result(self, timeout: float = settings.call_timeout) -> Res:
-        with fail_after(timeout):
-            await self._ready.wait()
-        if isinstance(self._result, Exception):
-            raise self._result
-        return t.cast(Res, self._result)
+        caller = self.sender
+        if caller is not None:
+            caller._deliver_reply(self.ref, value)
 
 
-@dataclass
-class Cast[Req = t.Any](Message):
+class CallReply(Message, tag=True, kw_only=True):
+    ref: str
+    result: t.Any
+
+
+class Cast[Req = t.Any](Message, tag=True, kw_only=True):
     message: Req
 
 
-# --- GenStage message types ---
-
-
-@dataclass
-class Subscribe(Message):
+class Subscribe(Message, tag=True, kw_only=True):
     """Sent by a consumer to a producer to initiate a subscription."""
 
     subscription_id: str
-    opts: dict[str, t.Any] = field(default_factory=dict)
+    opts: dict[str, t.Any] = msgspec.field(default_factory=dict)
 
 
-@dataclass
-class SubscribeAck(Message):
+class SubscribeAck(Message, tag=True, kw_only=True):
     """Sent by a producer back to the consumer acknowledging the subscription."""
 
     subscription_id: str
-    opts: dict[str, t.Any] = field(default_factory=dict)
+    opts: dict[str, t.Any] = msgspec.field(default_factory=dict)
 
 
-@dataclass
-class Cancel(Message):
+class Cancel(Message, tag=True, kw_only=True):
     """Sent by either side to cancel a subscription."""
 
     subscription_id: str
     reason: t.Any = "normal"
 
 
-@dataclass
-class Demand(Message):
+class Demand(Message, tag=True, kw_only=True):
     """Sent by a consumer to a producer requesting more events."""
 
     subscription_id: str
     count: int
 
 
-@dataclass
-class Events(Message):
+class Events(Message, tag=True, kw_only=True):
     """Sent by a producer to a consumer delivering events."""
 
     subscription_id: str
-    events: list[t.Any] = field(default_factory=list)
+    events: list[t.Any] = msgspec.field(default_factory=list)
+
+
+class CrashReason(msgspec.Struct, frozen=True):
+    """Wire-safe crash reason. Produced from an exception on the emitting side."""
+
+    class_name: str
+    repr: str
+    traceback_str: str
+
+    @classmethod
+    def from_exception(cls, exc: BaseException) -> "CrashReason":
+        try:
+            import tblib  # ty: ignore[unresolved-import]
+
+            pickled_tb = tblib.Traceback(exc.__traceback__).as_dict()
+            tb_str = repr(pickled_tb)
+        except ImportError:
+            import traceback
+
+            tb_str = "".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__)
+            )
+        return cls(
+            class_name=type(exc).__name__,
+            repr=repr(exc),
+            traceback_str=tb_str,
+        )

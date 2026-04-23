@@ -11,6 +11,7 @@ import typing as t
 from dataclasses import dataclass, field
 
 from anyio import (
+    BrokenResourceError,
     ClosedResourceError,
     EndOfStream,
     Event,
@@ -24,8 +25,19 @@ from fastactor import telemetry
 from fastactor.settings import settings
 from fastactor.utils import emit_awaited, id_generator
 
-from ._exceptions import Crashed, Shutdown, is_normal_shutdown_reason
-from ._messages import Continue, Down, Exit, Ignore, Info, Message, Stop
+from ._exceptions import Crashed, Failed, Shutdown, is_normal_shutdown_reason
+from ._messages import (
+    Call,
+    Continue,
+    Down,
+    Exit,
+    Ignore,
+    Info,
+    Message,
+    Stop,
+    _call_ref,
+    _pid_of,
+)
 
 if t.TYPE_CHECKING:
     from .supervisor import Supervisor
@@ -57,6 +69,8 @@ class Process:
     monitors: dict[str, "Process"] = field(default_factory=dict, init=False)
     monitored_by: dict[str, "Process"] = field(default_factory=dict, init=False)
     _ignored_down_refs: set[str] = field(default_factory=set, init=False)
+    _pending_calls: dict[str, Event] = field(default_factory=dict, init=False)
+    _pending_results: dict[str, t.Any] = field(default_factory=dict, init=False)
 
     emitter: EventEmitter = field(default_factory=EventEmitter, init=False)
 
@@ -70,13 +84,9 @@ class Process:
 
     async def _emit(self, event: str, **payload: t.Any) -> None:
         await emit_awaited(self.emitter, event, self, **payload)
-        try:
-            from .runtime import Runtime
+        from .runtime import Runtime
 
-            rt = Runtime.current()
-        except RuntimeError:
-            return
-        await emit_awaited(rt.emitter, event, self, **payload)
+        await emit_awaited(Runtime.current().emitter, event, self, **payload)
 
     async def _init(self, *args, **kwargs):
         logger.debug("%s init", self)
@@ -151,7 +161,9 @@ class Process:
                 self.monitored_by.pop(ref, None)
                 process._drop_monitor_ref(ref)
                 try:
-                    await process.send(Down(self, reason, ref))
+                    await process.send(
+                        Down(sender_id=_pid_of(self), reason=reason, ref=ref)
+                    )
                 except Exception as error:
                     logger.error(
                         "%r sending Down(%s, %s, %s) to monitor: %s",
@@ -168,7 +180,7 @@ class Process:
                 self.unlink(process)
                 if process.trap_exits:
                     try:
-                        await process.send(Exit(self, reason))
+                        await process.send(Exit(sender_id=_pid_of(self), reason=reason))
                     except Exception as error:
                         logger.error(
                             "%r sending Exit(%s, %s) to linked actor: %s",
@@ -187,12 +199,9 @@ class Process:
             self.monitors.pop(ref, None)
             process.monitored_by.pop(ref, None)
 
-        try:
-            from .runtime import Runtime
+        from .runtime import Runtime
 
-            await Runtime.current().unregister(self)
-        except RuntimeError:
-            pass
+        await Runtime.current().unregister(self)
 
         logger.debug("%s terminated reason=%s", self, reason)
 
@@ -211,6 +220,61 @@ class Process:
     def _drop_monitor_ref(self, ref: str) -> None:
         self.monitors.pop(ref, None)
 
+    def _deliver_reply(self, ref: str, result: t.Any) -> None:
+        """Wire a Call reply into the caller's pending-calls side-table.
+
+        Silently drops if the caller already exited (timed out / cancelled).
+        Otherwise a late reply would leak a `_pending_results` entry.
+        """
+        event = self._pending_calls.get(ref)
+        if event is None:
+            return
+        self._pending_results[ref] = result
+        event.set()
+
+    async def _perform_call(
+        self,
+        request: t.Any,
+        caller: "Process | None",
+        timeout: float,
+        metadata: dict[str, t.Any] | None,
+    ) -> t.Any:
+        """Shared call machinery — used by both GenServer and GenStateMachine.
+
+        `self` is the target, `caller` is the awaiting process. The reply is
+        delivered into `caller._pending_{calls,results}` by the target's
+        `Call.set_result(value)` → `caller._deliver_reply(ref, value)` path.
+        """
+        if caller is None:
+            raise Failed("no_caller")
+
+        ref = _call_ref()
+        event = Event()
+        caller._pending_calls[ref] = event
+        callmsg = Call(
+            sender_id=_pid_of(caller),
+            message=request,
+            ref=ref,
+            metadata=metadata,
+        )
+        try:
+            try:
+                self.send_nowait(callmsg)
+            except (BrokenResourceError, ClosedResourceError):
+                raise Failed("noproc")
+
+            with fail_after(timeout):
+                await event.wait()
+
+            result = caller._pending_results.pop(ref, None)
+        finally:
+            caller._pending_calls.pop(ref, None)
+            caller._pending_results.pop(ref, None)
+
+        if isinstance(result, Exception):
+            raise result
+        return result
+
     def _monitor_refs(self, other_or_ref: "Process | str") -> list[str]:
         if isinstance(other_or_ref, Process):
             return [
@@ -221,7 +285,7 @@ class Process:
     def monitor(self, other: "Process") -> str:
         ref = _monitor_ref()
         if other.has_stopped():
-            self.send_nowait(Down(other, "noproc", ref))
+            self.send_nowait(Down(sender_id=_pid_of(other), reason="noproc", ref=ref))
             return ref
 
         self.monitors[ref] = other
@@ -239,8 +303,17 @@ class Process:
                 self._ignored_down_refs.add(ref)
 
     def _prepare_outbound(self, message: t.Any) -> t.Any:
-        if telemetry.is_enabled() and isinstance(message, Message):
+        if not isinstance(message, Message):
+            return message
+        if telemetry.is_enabled():
             message.metadata = telemetry.inject(message.metadata)
+        sid = message.sender_id
+        if sid is not None and not sid.node and "_sender_ref" not in message.__dict__:
+            from .runtime import Runtime
+
+            sender_proc = Runtime.current().processes.get(sid.id)
+            if sender_proc is not None:
+                message.__dict__["_sender_ref"] = sender_proc
         return message
 
     async def send(self, message: t.Any):
@@ -261,7 +334,9 @@ class Process:
             return
 
         logger.debug("%s stop %s", self, reason)
-        self.send_nowait(Stop(sender or self.supervisor, reason))
+        self.send_nowait(
+            Stop(sender_id=_pid_of(sender or self.supervisor), reason=reason)
+        )
         with fail_after(timeout):
             await self.stopped()
 
@@ -284,7 +359,9 @@ class Process:
         metadata: dict[str, t.Any] | None = None,
     ):
         sender = sender or self.supervisor
-        self.send_nowait(Info(sender, message, metadata=metadata))
+        self.send_nowait(
+            Info(sender_id=_pid_of(sender), message=message, metadata=metadata)
+        )
 
     async def handle_info(self, message: Info) -> Continue | None:
         return None
@@ -433,12 +510,13 @@ class Process:
 
     async def _handle_message(self, message: Message) -> None:
         match message:
-            case Stop(_, reason):
+            case Stop(reason=reason):
                 raise Shutdown(reason)
-            case Exit(_, reason):
+            case Exit(reason=reason):
                 if not self.trap_exits and not is_normal_shutdown_reason(reason):
-                    if message.sender is not None:
-                        self.unlink(message.sender)
+                    sender = message.sender
+                    if sender is not None:
+                        self.unlink(sender)
                     raise Shutdown(reason)
                 await self.handle_exit(message)
             case Down(ref=ref):

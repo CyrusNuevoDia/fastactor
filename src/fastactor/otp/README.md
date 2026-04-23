@@ -480,7 +480,7 @@ with fail_after(5):
 #   returns the result on success,
 #   returns the Exception object on crash,
 #   returns None on timeout.
-result = await task.yield_(timeout=1)
+result = await task.poll(timeout=1)
 
 # Graceful stop; falls back to kill() if the task doesn't stop within `timeout`.
 await task.shutdown(timeout=5)
