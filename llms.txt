@@ -1,24 +1,32 @@
 # fastactor
 
-> Elixir/OTP-style actors for Python, built on [anyio](https://anyio.readthedocs.io/). Processes with mailboxes, GenServers with `call`/`cast`, supervisors with `one_for_one` / `one_for_all` / `rest_for_one` restart strategies, `DynamicSupervisor`, `Registry` (unique / duplicate), `Agent`, awaitable `Task`, links, monitors, `trap_exits`, `handle_continue`, and named registration — all faithful to the OTP semantics you know from Elixir, translated to idiomatic Python with `async` / `await` and `anyio` task groups.
+> Elixir/OTP-style actors for Python, built on [anyio](https://anyio.readthedocs.io/). Processes with mailboxes; `GenServer` (`call`/`cast`), `GenEvent` (multi-handler event manager), `GenStage` (demand-driven backpressured pipelines), `GenStateMachine` (`gen_statem`-style FSMs); supervisors with `one_for_one` / `one_for_all` / `rest_for_one`, `DynamicSupervisor`, `Registry` (unique / duplicate), `Agent`, awaitable `Task`, links, monitors, `trap_exits`, `handle_continue`, named registration, and optional OpenTelemetry tracing — all faithful to the OTP semantics you know from Elixir, translated to idiomatic Python with `async` / `await` and `anyio` task groups.
 
-This file is the cross-cutting orientation for agents writing code against `fastactor` — mental model, idiomatic patterns, gotchas. For per-primitive API reference, follow the links in the **Primitive index** below into [`src/fastactor/otp/README.md`](src/fastactor/otp/README.md) and the source files themselves. For testing patterns, see [`src/tests/README.md`](src/tests/README.md).
+This file is **navigation, not a reference manual**. It gives you the mental model, where each piece lives, and the cross-cutting gotchas. For per-primitive APIs, read [`src/fastactor/otp/README.md`](src/fastactor/otp/README.md). For testing patterns, [`src/tests/README.md`](src/tests/README.md). For authoritative behavior, [`src/tests/otp/SPEC.md`](src/tests/otp/SPEC.md). To learn the model end-to-end, work through the 12-part walkthrough at [`src/tests/tutorial/`](src/tests/tutorial/README.md).
 
 ---
 
 ## Orientation
 
-- **Import root:** `from fastactor.otp import ...` re-exports the entire public surface.
+- **Top-level imports:** `from fastactor import run, settings, telemetry`. The actor surface is a separate package: `from fastactor.otp import ...`.
 - **Runtime requirement:** every actor operation requires an active `Runtime` context (`async with Runtime(): ...`). Exactly one Runtime may be active per process.
 - **Concurrency model:** `anyio` structured concurrency. Every actor runs inside the Runtime's `TaskGroup`; cancellation and teardown are propagated structurally.
 - **Python:** 3.13+.
 - **Mailbox:** bounded anyio memory object stream, capacity from `settings.mailbox_size` (default 1024, env var `FASTACTOR_MAILBOX_SIZE`).
+- **Framework envelopes:** built-in protocol messages are tagged `msgspec.Struct`s carrying `sender_id: Pid | None` plus optional `metadata`. Use `message.sender_id` for stable identity; `message.sender` is a convenience that resolves back to the live local `Process` when possible. Raw `proc.send(obj)` still places arbitrary Python objects on the mailbox unwrapped.
+
+### Where to go next
+
+- **Learn the model:** [`src/tests/tutorial/`](src/tests/tutorial/README.md) — 12 lessons that are also runnable tests.
+- **Per-primitive API:** [`src/fastactor/otp/README.md`](src/fastactor/otp/README.md) — contracts, return shapes, examples.
+- **Authoritative behavior:** [`src/tests/otp/SPEC.md`](src/tests/otp/SPEC.md) — behaviour spec used to drive development.
+- **Testing patterns:** [`src/tests/README.md`](src/tests/README.md) — fixtures, doubles, deterministic-sync idioms.
 
 ---
 
-## Mental model — Elixir ↔ Python
+## Mental model — Elixir ↔ fastactor (core)
 
-Both columns show the **call you actually write** — your subclass / module on the user-code rows, the framework name on the framework rows.
+Both columns show the **call you actually write** — your subclass / module on the user-code rows, the framework name on the framework rows. Advanced primitives (`GenEvent`, `GenStage`, `GenStateMachine`) are summarized in their own section below.
 
 | Elixir / OTP                                            | fastactor                                                 | Notes                                                                                        |
 | ------------------------------------------------------- | --------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
@@ -26,7 +34,7 @@ Both columns show the **call you actually write** — your subclass / module on 
 | `GenServer.call(pid, :req)`                             | `await worker.call(request, timeout=5)`                   | Raises on timeout or on callback exception.                                                  |
 | `GenServer.cast(pid, :req)`                             | `worker.cast(request)`                                    | Fire-and-forget, synchronous call (not awaitable).                                           |
 | `handle_call({:foo, bar}, _from, state)`                | `handle_call(self, call: Call)` — match `call.message`    | Bare return value becomes the reply; return `None` to defer (see below).                     |
-| `{:noreply, state}` / `GenServer.reply(from, v)`        | `return None`, then later `call.set_result(v)`            | No sentinel class — `None` return means "don't reply yet"; caller stashes `call` and replies later. |
+| `{:noreply, state}` / `GenServer.reply(from, v)`        | `return None`, then later `call.set_result(v)`            | No sentinel class — `None` means "don't reply yet"; the server stashes the `Call` and resolves it later. Internally `Call` carries a `ref` and `set_result` resolves the caller's pending slot. |
 | `{:stop, reason, reply, state}`                         | `return (reply, Stop(reason))`                            | Caller gets `reply`, then the server stops with `reason`. Symmetric with `(reply, Continue(term))`. |
 | `{:noreply, state, {:continue, arg}}`                   | `return Continue("arg")`                                  | `handle_continue` runs next, before the next mailbox read.                                   |
 | `{:via, Registry, {R, key}}`                            | `await Worker.start(via=("R", key))`                      | Mutually exclusive with `name=`. Also returns by `whereis(("R", key))`.                      |
@@ -38,30 +46,27 @@ Both columns show the **call you actually write** — your subclass / module on 
 | `Agent.start_link(fn -> 0 end)`                         | `await Agent.start(lambda: 0)`                            | Tiny state-holder over `GenServer`.                                                          |
 | `Task.async(fn)` / `Task.async_nolink(fn)`              | `await Task.start_link(fn)` / `await Task.start(fn)`      | `start_link` cascades a crash to caller; `start` does not. Consume with `result = await t`.  |
 
-The names match where the Python idiom allows; divergences are intentional and annotated here so you don't guess.
+The names match where the Python idiom allows; divergences are intentional and annotated.
 
 ---
 
-## Installation
+## Advanced primitives at a glance
 
-Requires Python 3.13+. This repo uses [uv](https://docs.astral.sh/uv/) and [mise](https://mise.jdx.dev/):
+These exist alongside `GenServer` for the cases where it isn't the right shape. Pick by intent:
 
-```bash
-uv sync
-uv run pytest src
-```
+- **`GenEvent`** — Erlang `gen_event`. One process hosts many `EventHandler` instances, each with its own state. Dispatch a single event to every handler in install order with `notify` (async) or `sync_notify` (await dispatch). Handler callbacks return `None` to keep, `RemoveHandler()` to drop, or `SwapHandler(args1, handler2, args2)` to atomically replace the handler. A handler that raises is removed; the manager keeps running. Source: [`gen_event.py`](src/fastactor/otp/gen_event.py). Public types: `GenEvent`, `EventHandler`, `RemoveHandler`, `SwapHandler`, `HandlerNotInstalled`.
 
-There is no PyPI release yet — install from source:
+- **`GenStage`** — Erlang `gen_stage`. Demand-driven, backpressured pipeline stages wired by subscription. Three roles share the `GenStage` base: `Producer[E]` (overrides `handle_demand`), `Consumer[E]` (calls `subscribe_to`, overrides `handle_events`), and `ProducerConsumer[In, Out]` (both). Routing is controlled by a dispatcher: `DemandDispatcher` (greedy, by outstanding demand), `BroadcastDispatcher` (every subscriber gets the same batch), or `PartitionDispatcher` (route by `hash_fn(event)`). `handle_demand` / `handle_events` may return a list or be `async def` generators yielding events. Wire envelopes: `Subscribe`, `SubscribeAck`, `Demand`, `Events`, `Cancel`. Source: [`gen_stage.py`](src/fastactor/otp/gen_stage.py).
 
-```bash
-uv add "fastactor @ git+https://github.com/CyrusNuevoDia/fastactor"
-```
+- **`GenStateMachine`** — Erlang `gen_statem`. Finite state machines with two callback modes (set on the class via `callback_mode`): `"handle_event_function"` (one `handle_event(event_type, event_content, state, data)`) or `"state_functions"` (one method per state). Either mode optionally adds `"state_enter"` for enter-actions. Callbacks return action lists composed of: `Reply(to=call, reply=...)`, `NextEvent(type, content)`, `Postpone()`, `StateTimeout(time, content)`, `Timeout(time, content, name=...)`, `Hibernate()` (no-op in Python; for API parity). Source: [`gen_state_machine.py`](src/fastactor/otp/gen_state_machine.py).
+
+These primitives don't yet have dedicated sections in `otp/README.md` — read the source docstrings and tests at [`src/tests/otp/test_gen_event.py`](src/tests/otp/test_gen_event.py), [`test_gen_stage.py`](src/tests/otp/test_gen_stage.py), [`test_gen_state_machine.py`](src/tests/otp/test_gen_state_machine.py).
 
 ---
 
 ## Primitive index
 
-Every primitive has a deep-dive section in [`src/fastactor/otp/README.md`](src/fastactor/otp/README.md). Source files are single-purpose — read the top of each for its module docstring.
+### Core primitives
 
 | Primitive                     | What it does                                                         | Source                                                                                          | Docs                                                                                         |
 | ----------------------------- | -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
@@ -75,8 +80,22 @@ Every primitive has a deep-dive section in [`src/fastactor/otp/README.md`](src/f
 | `Task`, `TaskSupervisor`      | One-shot awaitable coroutines, linked or unlinked                    | [`task.py`](src/fastactor/otp/task.py)                                                          | [README §Task & TaskSupervisor](src/fastactor/otp/README.md#task--tasksupervisor)            |
 | `handle_continue`             | Post-callback continuations                                          | [`process.py`](src/fastactor/otp/process.py), [`gen_server.py`](src/fastactor/otp/gen_server.py) | [README §handle_continue](src/fastactor/otp/README.md#handle_continue)                       |
 | Named registration            | `name=` (global) vs `via=(registry, key)` at `start()`               | [`runtime.py`](src/fastactor/otp/runtime.py), [`registry.py`](src/fastactor/otp/registry.py)    | [README §Named registration](src/fastactor/otp/README.md#named-registration-at-start)        |
-| Messages                      | `Call`, `Cast`, `Info`, `Stop`, `Exit`, `Down`, `Continue`, `Ignore` | [`_messages.py`](src/fastactor/otp/_messages.py)                                                | [README §Messages reference](src/fastactor/otp/README.md#messages-reference)                 |
-| Exceptions                    | `Crashed`, `Failed`, `Shutdown`, `AlreadyRegistered`                 | [`_exceptions.py`](src/fastactor/otp/_exceptions.py)                                            | [README §Exceptions](src/fastactor/otp/README.md#exceptions)                                 |
+
+### Advanced primitives
+
+| Primitive          | What it does                                                              | Source                                                                       |
+| ------------------ | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `GenEvent`         | Event manager hosting many `EventHandler`s with their own state           | [`gen_event.py`](src/fastactor/otp/gen_event.py)                             |
+| `GenStage`         | Demand-driven backpressured pipelines (`Producer`/`Consumer`/`ProducerConsumer` + 3 dispatchers) | [`gen_stage.py`](src/fastactor/otp/gen_stage.py)         |
+| `GenStateMachine`  | OTP `gen_statem` FSMs with `Reply`/`NextEvent`/`Postpone`/state & generic timeouts | [`gen_state_machine.py`](src/fastactor/otp/gen_state_machine.py)    |
+
+### Cross-cutting
+
+| Concern                    | What it does                                                                           | Source                                                                                          |
+| -------------------------- | -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Messages / wire structs    | `Pid`, `Call`, `CallReply`, `Cast`, `Info`, `Stop`, `Exit`, `Down`, `Subscribe`, `SubscribeAck`, `Cancel`, `Demand`, `Events`, `Continue`, `Ignore`, `CrashReason` | [`_messages.py`](src/fastactor/otp/_messages.py)               |
+| Exceptions                 | `Crashed`, `Failed`, `Shutdown`, `AlreadyRegistered`                                   | [`_exceptions.py`](src/fastactor/otp/_exceptions.py)                                            |
+| Telemetry (optional)       | OpenTelemetry traces and metrics; gated by `[otel]` extra                              | [`telemetry.py`](src/fastactor/telemetry.py)                                                    |
 
 ---
 
@@ -120,11 +139,7 @@ counter = await Counter.start()
 await rt.stop()                         # equivalent to leaving `async with`
 ```
 
-`Runtime.start()` enforces the singleton the same way the context manager does. `Runtime.stop()` is idempotent after the first call clears the singleton.
-
-### Why no "auto-cleanup on process exit"
-
-Python's `atexit` hooks run synchronously after the event loop has already closed. There's no reliable way to schedule `await rt.__aexit__()` from a sync finalizer. Signal handlers give the same effective guarantee within the live loop: `SIGINT`/`SIGTERM` arrive → task group cancels → `__aexit__` cleans up → process exits. That's why `trap_signals=True` is the default.
+`Runtime.start()` enforces the singleton the same way the context manager does. `Runtime.stop()` is idempotent after the first call clears the singleton. Python's `atexit` runs synchronously after the loop is closed, so signal traps are the only reliable way to cleanly tear down on Ctrl-C — that's why `trap_signals=True` is the default.
 
 ### `whereis` — global lookup
 
@@ -136,6 +151,38 @@ proc = await whereis(("sessions", user_id))
 ```
 
 Accepts either a string (global name, registered via `name=` at start) or a `(registry, key)` tuple.
+
+---
+
+## Messages & wire safety
+
+**Source:** [`_messages.py`](src/fastactor/otp/_messages.py)
+
+The mailbox transports tagged `msgspec.Struct` envelopes. The base `Message` carries `sender_id: Pid | None` and an optional `metadata: dict[str, Any]`. Concrete variants:
+
+- **Generic OTP control:** `Info`, `Stop`, `Exit`, `Down`, `Continue`, `Ignore`.
+- **Synchronous request/reply:** `Call[Req, Res]` (carries a `ref: str`); reply envelope `CallReply` (`ref`, `result`).
+- **Fire-and-forget:** `Cast[Req]`.
+- **GenStage subscription protocol:** `Subscribe`, `SubscribeAck`, `Demand`, `Events`, `Cancel`.
+- **Wire-safe crash payload:** `CrashReason` (frozen `msgspec.Struct` with `class_name`, `repr`, `traceback_str` — uses `tblib` if installed).
+
+### `Pid` is the stable identity
+
+```python
+class Pid(msgspec.Struct, frozen=True):
+    id: str
+    node: str = ""        # "" → local; non-empty → remote (future)
+```
+
+`Pid` is what gets stamped onto every framework message. `message.sender_id` is the durable handle. `message.sender` is a property that resolves it back to a live local `Process` via `Runtime.current().processes`, falling back to a strong `_sender_ref` stashed at send time. The fallback means **a message can outlive its sender** — `message.sender` may still return the original `Process` even after it has terminated and been unregistered.
+
+### The deferred-reply mechanism
+
+The user-facing API is unchanged: stash the `Call` from `handle_call`, return `None`, then later call `saved_call.set_result(v)`. Internally, `set_result` calls `caller._deliver_reply(ref, value)` to populate the caller's pending-reply side-table, which `await server.call(...)` is waiting on. `CallReply` is exported as a wire envelope but the local in-process reply path does not currently emit it.
+
+### Telemetry metadata
+
+Every framework message has an optional `metadata: dict[str, Any]`. The OTel integration uses this to carry trace context across mailbox boundaries; you can also stamp your own keys.
 
 ---
 
@@ -153,7 +200,7 @@ if __name__ == "__main__":
     anyio.run(main)
 ```
 
-Never open two Runtimes concurrently. For tests, use the `runtime` fixture in `src/tests/conftest.py` (see [`src/tests/README.md`](src/tests/README.md)).
+Never open two Runtimes concurrently. For tests, use the autouse `runtime` fixture in [`src/tests/conftest.py`](src/tests/conftest.py).
 
 ### 2. Build a supervision tree top-down
 
@@ -208,6 +255,15 @@ For unbounded parallelism with backpressure, use a `TaskSupervisor` with `max_ch
 
 Don't write a full GenServer for a counter. Use `Agent`. If your state manipulation is complex enough to need match/case, promote to GenServer.
 
+### 8. Pick the right primitive by intent
+
+- One process, sync request/reply or fire-and-forget → **`GenServer`**.
+- One process, many independent observers each with their own state → **`GenEvent`**.
+- A streaming pipeline that must respect downstream backpressure → **`GenStage`**.
+- A finite-state protocol with state-specific event handling and timers → **`GenStateMachine`**.
+- "Just hold this value" → **`Agent`**.
+- One-shot awaitable coroutine → **`Task`**.
+
 ---
 
 ## Common gotchas
@@ -241,7 +297,7 @@ Nesting `async with Runtime():` raises. If you need child runtimes (tests, etc.)
 
 ### `handle_call` returning `None` means NoReply, not "reply with None"
 
-A `handle_call` body that falls through to `None` (including the default base-class implementation) does NOT resolve the caller's `await server.call(...)` — the caller stays blocked until something calls `call.set_result(value)`. To reply with the *literal* value `None`, either use a tuple form (`return (None, Continue("ok"))`) or resolve the Call explicitly. In practice, pick a meaningful non-None reply (`True`, `"ok"`, the new state).
+A `handle_call` body that falls through to `None` (including the default base-class implementation) does NOT resolve the caller's `await server.call(...)` — the caller stays blocked until something calls `call.set_result(value)`. To reply with the *literal* value `None`, either use a tuple form (`return (None, Continue("ok"))`) or resolve the Call explicitly. In practice, pick a meaningful non-None reply (`True`, `"ok"`, the new state). The user-facing deferred-reply API is unchanged even though the implementation is now `ref` + caller side-table, not a per-`Call` event.
 
 ### `call` timeout raises, doesn't return None
 
@@ -264,13 +320,33 @@ async def handle_call(self, call: Call):
         return {"error": str(e)}        # caller gets the dict, server does NOT crash
 ```
 
-### `current_process` ContextVar powers the default `sender`
+### `current_process` chooses the default outbound sender; `message.sender` is resolved
 
-Inside a callback, `current_process` is set to the handling process. `server.call(req)` from inside `handle_info` defaults `sender` to `self`. You almost never override this manually — but know it's there when debugging messages that appear to come from `None`.
+Inside a callback, the `current_process` ContextVar is set to the handling process, so `server.call(req)` / `server.cast(req)` default `sender` to `self` when you omit it. But received envelopes store `sender_id: Pid | None`, not a raw `Process`. `message.sender` is a property that resolves `sender_id` through `Runtime.current().processes` or a send-time `_sender_ref`. If you need durable identity, or you see `message.sender is None`, inspect `message.sender_id`. (`Process.info()` still defaults to the supervisor unless you pass `sender=` explicitly.)
+
+### `Pid` is identity; `Process` is the live object
+
+Use `Pid` / `message.sender_id` for durable identity and equality across messages. `Process.__eq__` only compares with other `Process` instances by `id`; a `Pid` and a `Process` are different types and do not compare equal.
+
+### `message.sender` may be `None` even when `sender_id` is present
+
+Returns `None` for remote pids (`sender_id.node != ""`), unresolved local ids (process already torn down with no `_sender_ref`), or messages decoded outside an active `Runtime`.
+
+### `CallReply` exists, but the local `call()` path does not currently emit it
+
+Treat `CallReply` as an exported wire envelope type, not as the mechanism `await server.call()` listens for. Local replies go through the caller-side pending-reply table.
+
+### `CrashReason` is data, not an exception
+
+`CrashReason` is a frozen `msgspec.Struct` — use it as a wire/logging payload, not as something you `raise` or `except`. Live `Exit` / `Down` propagation still carries raw `reason: Any`.
+
+### `Any` payloads are local-friendly, not automatically wire-safe
+
+`Call.message`, `Cast.message`, `Info.message`, and reason fields are typed `Any`. In-process actors can pass arbitrary Python objects, but only structured / serializable payloads are safe for msgspec round-trips. Avoid lambdas, coroutine objects, live `Process` references, and other runtime-only objects when wire-safety matters.
 
 ### Normal exit reasons are a whitelist
 
-Only `"normal"`, `"shutdown"`, and `Shutdown(...)` are normal. Anything else — including `None`, `""`, `"ok"` — is treated as abnormal and cascades across links / triggers `transient` restarts.
+Only `"normal"`, `"shutdown"`, and `Shutdown(...)` are normal. Anything else — including `None`, `""`, `"ok"` — is treated as abnormal and cascades across links / triggers `transient` restarts. `is_normal_shutdown_reason` in `_exceptions.py` is the single source of truth.
 
 ### `brutal_kill` skips `terminate`
 
@@ -295,74 +371,86 @@ If your task crashes and you don't `await` it, the exception is silently lost. A
 
 ---
 
-## Settings
+## Repo workflow & settings
+
+Python is pinned via `mise.toml` (3.13.7); deps are managed by [uv](https://docs.astral.sh/uv/). Day-to-day work goes through `just` recipes ([`justfile`](justfile)):
+
+```bash
+uv sync                 # install / sync dependencies
+just test               # full non-e2e suite (skips src/tests/e2e/)
+just test gen_server    # filter by name (-k)
+just test e2e           # run only the e2e suite
+just debug              # stop at first failure, drop into ipdb
+just lint               # ruff check + ty check
+just fmt                # ruff format + ruff check --fix
+just repl               # ipython with `from fastactor.otp import *`
+```
+
+Single test:
+
+```bash
+uv run pytest src/tests/otp/test_gen_server.py::test_call_returns_echo_payload
+```
+
+Optional OpenTelemetry integration: `pip install fastactor[otel]`, then either pass `Runtime(telemetry=True)` or set `FASTACTOR_TELEMETRY_ENABLED=1`. See [`src/fastactor/telemetry.py`](src/fastactor/telemetry.py).
+
+There is no PyPI release yet — install from source:
+
+```bash
+uv add "fastactor @ git+https://github.com/CyrusNuevoDia/fastactor"
+```
 
 Runtime defaults live in `fastactor.settings.Settings` (pydantic-settings). Override with `FASTACTOR_`-prefixed env vars.
 
-| Setting                   | Env var                             | Default |
-| ------------------------- | ----------------------------------- | ------- |
-| `mailbox_size`            | `FASTACTOR_MAILBOX_SIZE`            | `1024`  |
-| `call_timeout`            | `FASTACTOR_CALL_TIMEOUT`            | `5`     |
-| `stop_timeout`            | `FASTACTOR_STOP_TIMEOUT`            | `60`    |
-| `supervisor_max_restarts` | `FASTACTOR_SUPERVISOR_MAX_RESTARTS` | `3`     |
-| `supervisor_max_seconds`  | `FASTACTOR_SUPERVISOR_MAX_SECONDS`  | `5.0`   |
-
-```bash
-FASTACTOR_MAILBOX_SIZE=4096 uv run python my_app.py
-```
+| Setting                   | Env var                             | Default      |
+| ------------------------- | ----------------------------------- | ------------ |
+| `mailbox_size`            | `FASTACTOR_MAILBOX_SIZE`            | `1024`       |
+| `call_timeout`            | `FASTACTOR_CALL_TIMEOUT`            | `5`          |
+| `stop_timeout`            | `FASTACTOR_STOP_TIMEOUT`            | `60`         |
+| `supervisor_max_restarts` | `FASTACTOR_SUPERVISOR_MAX_RESTARTS` | `1`          |
+| `supervisor_max_seconds`  | `FASTACTOR_SUPERVISOR_MAX_SECONDS`  | `5.0`        |
+| `telemetry_enabled`       | `FASTACTOR_TELEMETRY_ENABLED`       | `False`      |
+| `telemetry_service_name`  | `FASTACTOR_TELEMETRY_SERVICE_NAME`  | `"fastactor"`|
 
 The mailbox size caps each process's inbox. `send_nowait` will raise `anyio.WouldBlock` if the mailbox is full.
 
 ---
 
-## Testing
+## Testing & behavior
 
-See [`src/tests/README.md`](src/tests/README.md) for the canonical patterns — fixtures (`runtime`, `supervisor`, `make_supervisor`), shared doubles (`EchoServer`, `CounterServer`, `BoomServer`, `CrashyServer`, `SlowStopServer`, `MonitorServer`, `LinkServer`, `ContinueServer`, `OrderObserver`, `await_child_restart`), and deterministic-sync patterns (call round-trip, `await proc.stopped()`, `MonitorServer.await_events(n)`).
+The test tree is split:
 
-The non-e2e suite (114 tests) runs in under a second. There is exactly one intentional `sleep(...)` call (in `test_max_restarts_window_resets_after_max_seconds`, which genuinely needs a time gap).
+- [`src/tests/otp/`](src/tests/otp) — unit tests for every OTP module, plus [`SPEC.md`](src/tests/otp/SPEC.md), the source-of-truth behavior spec used to drive development.
+- [`src/tests/tutorial/`](src/tests/tutorial) — 12-part actor-model walkthrough; each file is also the lesson, with a [`README.md`](src/tests/tutorial/README.md) for narrative order.
+- [`src/tests/e2e/`](src/tests/e2e) — multi-agent system demos (chaos monkey, adaptive pool, consensus voting, hierarchical planning, racing speculators, compute/state split). Skipped by `just test`; run explicitly via `just test e2e`.
+- [`src/tests/test_telemetry.py`](src/tests/test_telemetry.py) — covers the optional OTEL integration.
 
----
+Shared `GenServer` doubles — `EchoServer`, `CounterServer`, `BoomServer`, `SlowStopServer`, `MonitorServer`, `LinkServer`, `ContinueServer`, `OrderLog`, `await_child_restart` — live in [`src/tests/otp/helpers.py`](src/tests/otp/helpers.py). Reuse them rather than rolling minimal subclasses in each test file. E2E helpers live separately in [`src/tests/e2e/helpers.py`](src/tests/e2e/helpers.py).
 
-## Complete public surface
-
-```python
-# Top-level (from fastactor import ...)
-fastactor.run, fastactor.settings
-
-# from fastactor.otp import ...
-# Primitives
-Process, GenServer, Agent, Task, TaskSupervisor
-
-# Supervisors
-Supervisor, DynamicSupervisor, ChildSpec, RunningChild
-RestartStrategy, RestartType, ShutdownType
-
-# Runtime + lookup
-Runtime, CrashRecord, Registry, whereis
-
-# Messages
-Call, Cast, Info, Stop, Exit, Down, Continue
-
-# Sentinels / exceptions
-Ignore, Shutdown, Crashed, Failed, AlreadyRegistered
-```
+For deterministic-sync patterns (call round-trip, `await proc.stopped()`, `MonitorServer.await_events(n)`), see [`src/tests/README.md`](src/tests/README.md).
 
 ---
 
-## Source layout
+## Public surface & source layout
+
+The authoritative export list is `fastactor.otp.__all__` in [`src/fastactor/otp/__init__.py`](src/fastactor/otp/__init__.py); top-level `fastactor` exports `run`, `settings`, `telemetry`. Read source in this order to absorb the design: `_messages.py` → `_exceptions.py` → `process.py` → `gen_server.py` → `supervisor.py` → `runtime.py`. The rest (`agent.py`, `dynamic_supervisor.py`, `registry.py`, `task.py`, `gen_event.py`, `gen_stage.py`, `gen_state_machine.py`, `telemetry.py`) layer onto that core.
 
 ```
 src/fastactor/
-├── __init__.py
+├── __init__.py                         # run, settings, telemetry
 ├── settings.py                         # pydantic-settings
-├── utils.py                            # id_generator (ksuids)
+├── telemetry.py                        # OpenTelemetry integration (optional [otel] extra)
+├── utils.py                            # id_generator (ksuids), emit_awaited
 └── otp/
     ├── __init__.py                     # public re-exports
-    ├── README.md                       # per-primitive API reference
-    ├── _exceptions.py                  # Crashed, Failed, Shutdown, is_normal_shutdown_reason
-    ├── _messages.py                    # Call, Cast, Info, Stop, Exit, Down, Continue, Ignore
+    ├── README.md                       # per-primitive API reference (core primitives)
+    ├── _exceptions.py                  # Crashed, Failed, Shutdown, AlreadyRegistered, is_normal_shutdown_reason
+    ├── _messages.py                    # Pid, Message, Call/CallReply/Cast/Info/Stop/Exit/Down, GenStage envelopes, Continue/Ignore, CrashReason
     ├── process.py                      # Process (base actor, lifecycle, links/monitors)
     ├── gen_server.py                   # GenServer
+    ├── gen_event.py                    # GenEvent, EventHandler, RemoveHandler, SwapHandler, HandlerNotInstalled
+    ├── gen_stage.py                    # GenStage, Producer, Consumer, ProducerConsumer, dispatchers
+    ├── gen_state_machine.py            # GenStateMachine, Reply, NextEvent, Postpone, StateTimeout, Timeout, Hibernate
     ├── supervisor.py                   # Supervisor, ChildSpec, strategies, restart intensity
     ├── dynamic_supervisor.py           # DynamicSupervisor
     ├── registry.py                     # Registry, AlreadyRegistered
@@ -373,17 +461,24 @@ src/fastactor/
 src/tests/
 ├── README.md                           # testing patterns, fixtures, doubles
 ├── conftest.py                         # anyio_backend, runtime, supervisor, make_supervisor
-├── support.py                          # shared GenServer doubles
-└── test_*.py                           # test modules
+├── test_telemetry.py                   # OTEL integration coverage
+├── otp/                                # unit tests + SPEC.md (authoritative behavior)
+│   ├── SPEC.md
+│   ├── helpers.py                      # shared GenServer doubles
+│   └── test_*.py
+├── tutorial/                           # 12-part walkthrough (also the lesson)
+│   ├── README.md
+│   └── test_*.py
+└── e2e/                                # multi-agent system demos (skipped by `just test`)
+    ├── helpers.py
+    └── test_*.py
 ```
-
-Reading top-to-bottom: `_messages.py` → `_exceptions.py` → `process.py` → `gen_server.py` → `supervisor.py` → `runtime.py` gives you the full picture. The rest (DynamicSupervisor, Registry, Agent, Task) are additive on top of that core.
 
 ---
 
 ## Prior art & further reading
 
-Erlang/OTP and Elixir's `GenServer` / `Supervisor` / `DynamicSupervisor` / `Registry` / `Agent` / `Task` modules are the direct inspiration.
+Erlang/OTP and Elixir's `GenServer` / `GenEvent` / `GenStage` / `gen_statem` / `Supervisor` / `DynamicSupervisor` / `Registry` / `Agent` / `Task` modules are the direct inspiration.
 
 ---
 
