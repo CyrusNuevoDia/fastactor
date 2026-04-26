@@ -17,15 +17,6 @@ from ._messages import (
     Subscribe,
     SubscribeAck,
 )
-from .gen_stage import (
-    BroadcastDispatcher,
-    Consumer,
-    DemandDispatcher,
-    GenStage,
-    PartitionDispatcher,
-    Producer,
-    ProducerConsumer,
-)
 from .agent import Agent
 from .dynamic_supervisor import DynamicSupervisor
 from .gen_event import (
@@ -36,6 +27,15 @@ from .gen_event import (
     SwapHandler,
 )
 from .gen_server import GenServer
+from .gen_stage import (
+    BroadcastDispatcher,
+    Consumer,
+    DemandDispatcher,
+    GenStage,
+    PartitionDispatcher,
+    Producer,
+    ProducerConsumer,
+)
 from .gen_state_machine import (
     GenStateMachine,
     Hibernate,
@@ -82,8 +82,8 @@ __all__ = [
     "Failed",
     "GenEvent",
     "GenServer",
-    "GenStateMachine",
     "GenStage",
+    "GenStateMachine",
     "HandlerNotInstalled",
     "Hibernate",
     "Ignore",
@@ -95,9 +95,9 @@ __all__ = [
     "Process",
     "Producer",
     "ProducerConsumer",
+    "Registry",
     "RemoveHandler",
     "Reply",
-    "Registry",
     "RestartStrategy",
     "RestartType",
     "RunningChild",

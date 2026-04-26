@@ -13,7 +13,7 @@ from .helpers import (
     await_child_restart,
 )
 
-from fastactor.otp import Failed, GenServer, Supervisor
+from fastactor.otp import Failed, GenServer, Shutdown, Supervisor
 
 pytestmark = pytest.mark.anyio
 
@@ -27,7 +27,7 @@ class TerminationRecorder(GenServer):
     async def init(self, label: str) -> None:
         self.label = label
 
-    async def terminate(self, reason: Any) -> None:
+    async def terminate(self, reason: str | Shutdown | Exception) -> None:
         OrderLog.record(self.label)
         await super().terminate(reason)
 
@@ -37,7 +37,7 @@ class LabeledBoom(BoomServer):
         self.label = label
         await super().init(on_init=on_init)
 
-    async def terminate(self, reason: Any) -> None:
+    async def terminate(self, reason: str | Shutdown | Exception) -> None:
         OrderLog.record(self.label)
         await super().terminate(reason)
 
@@ -487,7 +487,7 @@ async def test_6_6_shutdown_timeout_calls_terminate_on_child(make_supervisor) ->
         async def init(self) -> None:
             self.terminated_with: Any = None
 
-        async def terminate(self, reason: Any) -> None:
+        async def terminate(self, reason: str | Shutdown | Exception) -> None:
             self.terminated_with = reason
             await super().terminate(reason)
 
@@ -544,7 +544,7 @@ async def test_6_6_brutal_kill_skips_terminate_callback(make_supervisor) -> None
         async def init(self) -> None:
             self.terminated = False
 
-        async def terminate(self, reason: Any) -> None:
+        async def terminate(self, reason: str | Shutdown | Exception) -> None:
             self.terminated = True
             await super().terminate(reason)
 

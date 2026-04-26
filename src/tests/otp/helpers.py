@@ -5,7 +5,7 @@ from typing import Any
 from anyio import Event, fail_after
 from anyio.lowlevel import checkpoint
 
-from fastactor.otp import Call, Cast, Continue, Down, Exit, GenServer, Process
+from fastactor.otp import Call, Cast, Continue, Down, Exit, GenServer, Process, Shutdown
 
 
 class EchoServer(GenServer):
@@ -56,7 +56,7 @@ class BoomServer(GenServer):
 
 
 class SlowStopServer(GenServer):
-    async def terminate(self, reason: Any) -> None:
+    async def terminate(self, reason: str | Shutdown | Exception) -> None:
         deadline = monotonic() + 0.05
         while monotonic() < deadline:
             await checkpoint()

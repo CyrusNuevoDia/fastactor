@@ -668,7 +668,7 @@ async def test_4_8_terminate_called_on_shutdown_when_trapping() -> None:
         async def init(self) -> None:
             self.reason: Any = None
 
-        async def terminate(self, reason: Any) -> None:
+        async def terminate(self, reason: str | Shutdown | Exception) -> None:
             self.reason = reason
             await super().terminate(reason)
 
@@ -690,7 +690,7 @@ async def test_4_8_no_terminate_when_not_trapping_exits() -> None:
         async def init(self) -> None:
             self.terminated = False
 
-        async def terminate(self, reason: Any) -> None:
+        async def terminate(self, reason: str | Shutdown | Exception) -> None:
             self.terminated = True
             await super().terminate(reason)
 

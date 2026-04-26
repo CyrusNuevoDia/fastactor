@@ -37,11 +37,11 @@ async def _stop_machine(machine: GenStateMachine) -> None:
     await machine.stopped()
 
 
-async def _wait_for(
+async def _wait_for[T](
     machine: GenStateMachine,
     request: str,
-    predicate: Callable[[Any], bool],
-) -> Any:
+    predicate: Callable[[T], bool],
+) -> T:
     with fail_after(2):
         while True:
             value = await machine.call(request)
