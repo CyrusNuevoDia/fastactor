@@ -1,9 +1,18 @@
 import pytest
+from anyio import fail_after
+from anyio.lowlevel import checkpoint
+
 from .helpers import BoomServer, CounterServer, await_child_restart
 
 from fastactor.otp import DynamicSupervisor, Failed
 
 pytestmark = pytest.mark.anyio
+
+
+async def await_child_spec_cleanup(sup, child_id: str, timeout: float = 2) -> None:
+    with fail_after(timeout):
+        while child_id in sup.child_specs:
+            await checkpoint()
 
 
 async def test_dynamic_supervisor_starts_children_with_temporary_default():
@@ -72,5 +81,70 @@ async def test_dynamic_supervisor_accepts_tuple_child_spec():
     child = await sup.start_child((CounterServer, {"count": 7}))
 
     assert await child.call("get") == 7
+
+    await sup.stop("normal")
+
+
+async def test_temporary_child_spec_is_dropped_after_normal_exit():
+    """G: a temporary dynamic child. W: it exits normally. T: the id can be re-used."""
+    sup = await DynamicSupervisor.start()
+    child = await sup.start_child(DynamicSupervisor.child_spec("x", CounterServer))
+
+    await child.stop("normal")
+    await child.stopped()
+    await await_child_spec_cleanup(sup, "x")
+
+    assert "x" not in sup.children
+    assert "x" not in sup.child_specs
+
+    restarted = await sup.start_child(DynamicSupervisor.child_spec("x", CounterServer))
+
+    assert restarted is not child
+    assert sup.children["x"].process is restarted
+
+    await sup.stop("normal")
+
+
+async def test_temporary_child_spec_is_dropped_after_crash():
+    """G: a temporary dynamic child. W: it crashes. T: the id can be re-used."""
+    sup = await DynamicSupervisor.start()
+    child = await sup.start_child(DynamicSupervisor.child_spec("x", BoomServer))
+
+    with pytest.raises(RuntimeError, match="Boom!"):
+        await child.call("boom")
+    await child.stopped()
+    await await_child_spec_cleanup(sup, "x")
+
+    assert "x" not in sup.children
+    assert "x" not in sup.child_specs
+
+    restarted = await sup.start_child(DynamicSupervisor.child_spec("x", BoomServer))
+
+    assert restarted is not child
+    assert sup.children["x"].process is restarted
+
+    await sup.stop("normal")
+
+
+async def test_transient_child_normal_exit_drops_spec():
+    """G: a transient dynamic child. W: it exits normally. T: the id can be re-used."""
+    sup = await DynamicSupervisor.start()
+    child = await sup.start_child(
+        DynamicSupervisor.child_spec("x", CounterServer, restart="transient")
+    )
+
+    await child.stop("normal")
+    await child.stopped()
+    await await_child_spec_cleanup(sup, "x")
+
+    assert "x" not in sup.children
+    assert "x" not in sup.child_specs
+
+    restarted = await sup.start_child(
+        DynamicSupervisor.child_spec("x", CounterServer, restart="transient")
+    )
+
+    assert restarted is not child
+    assert sup.children["x"].process is restarted
 
     await sup.stop("normal")

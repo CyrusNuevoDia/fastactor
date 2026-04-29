@@ -55,6 +55,12 @@ async def await_process_stop(process, timeout: float = 2):
     return process
 
 
+async def await_child_spec_cleanup(sup, child_id: str, timeout: float = 2) -> None:
+    with fail_after(timeout):
+        while child_id in sup.child_specs:
+            await checkpoint()
+
+
 async def _crash(child) -> None:
     with pytest.raises(RuntimeError, match="Boom!"):
         await child.call("boom")
@@ -379,6 +385,33 @@ async def test_6_4_one_for_all_restarts_every_child(make_supervisor) -> None:
     assert new_b is not b
 
 
+async def test_6_4_one_for_all_drops_terminal_child_spec_when_not_restarting(
+    make_supervisor,
+) -> None:
+    """SPEC §6.4: one_for_all removes a non-restarting child's spec so its id can be re-used."""
+    sup = await make_supervisor(strategy="one_for_all")
+    a = await sup.start_child(sup.child_spec("a", CounterServer, restart="temporary"))
+    b = await sup.start_child(sup.child_spec("b", CounterServer, restart="permanent"))
+
+    await a.stop("normal")
+    await await_process_stop(a)
+    await await_process_stop(b)
+    await await_child_spec_cleanup(sup, "a")
+
+    with fail_after(2):
+        while sup.children:
+            await checkpoint()
+
+    assert "a" not in sup.child_specs
+    assert "b" in sup.child_specs
+
+    restarted_a = await sup.start_child(
+        sup.child_spec("a", CounterServer, restart="temporary")
+    )
+
+    assert restarted_a is not a
+
+
 async def test_6_4_rest_for_one_restarts_failed_and_later_siblings(
     make_supervisor,
 ) -> None:
@@ -404,6 +437,37 @@ async def test_6_4_rest_for_one_restarts_failed_and_later_siblings(
     new_last = await await_child_restart(sup, "last", last)
     assert new_middle is not middle
     assert new_last is not last
+
+
+async def test_6_4_rest_for_one_drops_terminal_child_spec_when_not_restarting(
+    make_supervisor,
+) -> None:
+    """SPEC §6.4: rest_for_one removes a non-restarting child's spec without disturbing running siblings."""
+    sup = await make_supervisor(strategy="rest_for_one")
+    first = await sup.start_child(
+        sup.child_spec("first", CounterServer, restart="permanent")
+    )
+    middle = await sup.start_child(
+        sup.child_spec("middle", CounterServer, restart="temporary")
+    )
+    last = await sup.start_child(
+        sup.child_spec("last", CounterServer, restart="permanent")
+    )
+
+    await middle.stop("normal")
+    await await_process_stop(middle)
+    await await_child_spec_cleanup(sup, "middle")
+
+    assert "middle" not in sup.children
+    assert "middle" not in sup.child_specs
+    assert sup.children["first"].process is first
+    assert sup.children["last"].process is last
+
+    restarted_middle = await sup.start_child(
+        sup.child_spec("middle", CounterServer, restart="temporary")
+    )
+
+    assert restarted_middle is not middle
 
 
 # ---------------------------------------------------------------------------

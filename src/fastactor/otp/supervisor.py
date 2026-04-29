@@ -104,6 +104,8 @@ class Supervisor(Process):
     children: dict[str, RunningChild] = field(default_factory=dict, init=False)
     _task_group: TaskGroup | None = field(default=None, init=False)
     _terminating: bool = field(default=False, init=False)
+    _preserve_child_specs: set[str] = field(default_factory=set, init=False)
+    _exited_child_specs: dict[str, ChildSpec] = field(default_factory=dict, init=False)
     _strategy_stopped_events: dict[str, Event] = field(default_factory=dict, init=False)
     _strategy_updates_receive: MemoryObjectReceiveStream[None] | None = field(
         default=None,
@@ -182,6 +184,14 @@ class Supervisor(Process):
                 return not is_normal_shutdown_reason(reason)
             case _:
                 raise ValueError(f"Invalid restart {spec.restart}")
+
+    def _drop_child_spec(self, child_id: str, spec: ChildSpec) -> None:
+        if child_id in self._preserve_child_specs:
+            self._preserve_child_specs.discard(child_id)
+            return
+
+        self._exited_child_specs[child_id] = spec
+        self.child_specs.pop(child_id, None)
 
     async def _shutdown_child(
         self,
@@ -262,6 +272,7 @@ class Supervisor(Process):
                 break
 
             if not self._should_restart(reason, spec):
+                self._drop_child_spec(child_id, spec)
                 break
 
             try:
@@ -323,7 +334,7 @@ class Supervisor(Process):
             return
 
         try:
-            self.send_nowait(Stop(sender_id=_pid_of(self), reason=reason))
+            self.send_nowait(Stop(pid=_pid_of(self), reason=reason))
         except BrokenResourceError:
             pass
 
@@ -449,6 +460,7 @@ class Supervisor(Process):
                 continue
 
             if not self._should_restart(reason, running_child.spec):
+                self._drop_child_spec(child_id, running_child.spec)
                 await self._restart_strategy_children(
                     ordered_ids,
                     reason="shutdown",
@@ -514,6 +526,7 @@ class Supervisor(Process):
                 continue
 
             if not self._should_restart(reason, spec):
+                self._drop_child_spec(child_id, spec)
                 self.children.pop(child_id, None)
                 self._strategy_stopped_events.pop(child_id, None)
                 continue
@@ -610,6 +623,19 @@ class Supervisor(Process):
                     "significant": False,
                 }
             )
+        for child_id, spec in self._exited_child_specs.items():
+            if child_id in self.child_specs:
+                continue
+            results.append(
+                {
+                    "id": spec.id,
+                    "process": ":undefined",
+                    "restart": spec.restart,
+                    "shutdown": spec.shutdown,
+                    "type": spec.type,
+                    "significant": False,
+                }
+            )
         return results
 
     def count_children(self) -> dict[str, int]:
@@ -648,6 +674,8 @@ class Supervisor(Process):
         if self._task_group is None:
             raise Failed("Supervisor not running.")
 
+        self._exited_child_specs.pop(child_id, None)
+        self._preserve_child_specs.discard(child_id)
         self.child_specs[child_id] = spec
 
         ready_event = Event()
@@ -676,6 +704,8 @@ class Supervisor(Process):
             self.children.pop(child_id, None)
             self._strategy_stopped_events.pop(child_id, None)
             await self._signal_strategy_update()
+        else:
+            self._preserve_child_specs.add(child_id)
         await self._shutdown_child(
             running_child.process,
             running_child.spec.shutdown,
