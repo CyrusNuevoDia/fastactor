@@ -66,7 +66,7 @@ async def test_info_metadata_reaches_handler(runtime: Runtime):
 
 async def test_prebuilt_message_metadata_survives_send(runtime: Runtime):
     proc = await InfoRecorder.start()
-    msg = Info(sender_id=None, message="direct", metadata={"k": "v"})
+    msg = Info(pid=None, message="direct", metadata={"k": "v"})
     await proc.send(msg)
     with fail_after(2):
         await proc.seen.wait()

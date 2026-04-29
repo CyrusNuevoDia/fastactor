@@ -27,7 +27,7 @@ pytestmark = pytest.mark.anyio
 
 class StopInInitServer(GenServer):
     async def init(self, reason: Any = "boot_failed") -> Stop:
-        return Stop(sender_id=None, reason=reason)
+        return Stop(pid=None, reason=reason)
 
 
 class DeferredReplyServer(GenServer):
@@ -223,7 +223,7 @@ async def test_handle_call_tuple_stop_with_reply():
 
     class Stoppy(GenServer):
         async def handle_call(self, call):
-            return ("farewell", Stop(sender_id=None, reason="custom_reason"))
+            return ("farewell", Stop(pid=None, reason="custom_reason"))
 
     monitor = await MonitorServer.start()
     srv = await Stoppy.start()
@@ -435,7 +435,7 @@ async def test_4_2_handle_call_stop_with_reply() -> None:
 
     class StoppyReply(GenServer):
         async def handle_call(self, call: Call) -> tuple[str, Stop]:
-            return ("farewell", Stop(sender_id=None, reason="bye"))
+            return ("farewell", Stop(pid=None, reason="bye"))
 
     srv = await StoppyReply.start()
 
@@ -454,7 +454,7 @@ async def test_4_2_handle_call_stop_without_reply() -> None:
     class StoppyNoReply(GenServer):
         async def handle_call(self, call: Call) -> Stop:  # type: ignore[override]
             # Erlang: {stop, Reason, NewState}. Port has no such shape.
-            return Stop(sender_id=None, reason="bye")  # type: ignore[return-value]
+            return Stop(pid=None, reason="bye")  # type: ignore[return-value]
 
     srv = await StoppyNoReply.start()
 

@@ -551,6 +551,4 @@ class GenStateMachine(Process):
         from .runtime import current_process
 
         sender = sender or current_process.get() or self.supervisor
-        self.send_nowait(
-            Cast(sender_id=_pid_of(sender), message=request, metadata=metadata)
-        )
+        self.send_nowait(Cast(pid=_pid_of(sender), message=request, metadata=metadata))

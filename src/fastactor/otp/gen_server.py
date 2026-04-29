@@ -96,7 +96,7 @@ class GenServer[Req = t.Any, Rep = t.Any](Process):
         with move_on_after(timeout) as scope:
             return await self._mailbox.receive()
         if scope.cancelled_caught:
-            return Info(sender_id=_pid_of(self.supervisor), message="timeout")
+            return Info(pid=_pid_of(self.supervisor), message="timeout")
         # Should not be reached; satisfy type checker
         return await self._mailbox.receive()  # pragma: no cover
 
@@ -170,7 +170,7 @@ class GenServer[Req = t.Any, Rep = t.Any](Process):
         sender = sender or current_process.get() or self.supervisor
         try:
             self.send_nowait(
-                Cast(sender_id=_pid_of(sender), message=request, metadata=metadata)
+                Cast(pid=_pid_of(sender), message=request, metadata=metadata)
             )
         except (BrokenResourceError, ClosedResourceError):
             pass

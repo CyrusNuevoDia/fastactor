@@ -44,7 +44,7 @@ def test_pid_roundtrip():
 
 
 def test_info_roundtrip():
-    msg = Info(sender_id=None, message="hi", metadata={"k": "v"})
+    msg = Info(pid=None, message="hi", metadata={"k": "v"})
     pickled, decoded = _roundtrip(msg, Info)
     assert pickled.message == "hi"
     assert decoded.message == "hi"
@@ -52,22 +52,23 @@ def test_info_roundtrip():
 
 
 def test_stop_roundtrip():
-    msg = Stop(sender_id=None, reason="shutdown")
+    msg = Stop(pid=None, reason="shutdown")
     pickled, decoded = _roundtrip(msg, Stop)
     assert pickled.reason == "shutdown"
     assert decoded.reason == "shutdown"
 
 
 def test_exit_roundtrip():
-    msg = Exit(sender_id=Pid(id="proc-1"), reason="boom")
+    msg = Exit(pid=Pid(id="proc-1"), reason="boom")
     pickled, decoded = _roundtrip(msg, Exit)
-    assert pickled.sender_id == Pid(id="proc-1")
+    assert pickled.pid == Pid(id="proc-1")
     assert decoded.reason == "boom"
 
 
 def test_down_roundtrip():
-    msg = Down(sender_id=Pid(id="target-1"), reason="noproc", ref="ref-1")
+    msg = Down(pid=Pid(id="target-1"), reason="noproc", ref="ref-1")
     pickled, decoded = _roundtrip(msg, Down)
+    assert decoded.pid == Pid(id="target-1")
     assert pickled.ref == "ref-1"
     assert decoded.ref == "ref-1"
     assert decoded.reason == "noproc"
@@ -76,17 +77,17 @@ def test_down_roundtrip():
 def test_call_roundtrip():
     # Generic PEP-695 Struct subclasses can't be used as msgspec.json decode targets
     # (msgspec can't resolve the TypeVar forward refs). Test pickle + encode only.
-    msg = Call(sender_id=Pid(id="caller-1"), message={"op": "get"}, ref="r-1")
+    msg = Call(pid=Pid(id="caller-1"), message={"op": "get"}, ref="r-1")
     pickled = pickle.loads(pickle.dumps(msg))
     assert pickled.ref == "r-1"
-    assert pickled.sender_id == Pid(id="caller-1")
+    assert pickled.pid == Pid(id="caller-1")
     raw = msgspec.json.encode(msg)
     assert b'"ref":"r-1"' in raw
     assert b'"type":"Call"' in raw
 
 
 def test_call_reply_roundtrip():
-    msg = CallReply(sender_id=None, ref="r-1", result=42)
+    msg = CallReply(pid=None, ref="r-1", result=42)
     pickled, decoded = _roundtrip(msg, CallReply)
     assert pickled.result == 42
     assert decoded.ref == "r-1"
@@ -95,7 +96,7 @@ def test_call_reply_roundtrip():
 
 def test_cast_roundtrip():
     # Generic PEP-695 Struct subclasses can't be used as msgspec.json decode targets.
-    msg = Cast(sender_id=Pid(id="caller-1"), message=["a", "b"])
+    msg = Cast(pid=Pid(id="caller-1"), message=["a", "b"])
     pickled = pickle.loads(pickle.dumps(msg))
     assert pickled.message == ["a", "b"]
     raw = msgspec.json.encode(msg)
@@ -105,7 +106,7 @@ def test_cast_roundtrip():
 
 def test_subscribe_roundtrip():
     msg = Subscribe(
-        sender_id=Pid(id="consumer-1"),
+        pid=Pid(id="consumer-1"),
         subscription_id="sub-1",
         opts={"max_demand": 10},
     )
@@ -116,7 +117,7 @@ def test_subscribe_roundtrip():
 
 def test_subscribe_ack_roundtrip():
     msg = SubscribeAck(
-        sender_id=Pid(id="producer-1"),
+        pid=Pid(id="producer-1"),
         subscription_id="sub-1",
         opts={"min_demand": 2},
     )
@@ -126,7 +127,7 @@ def test_subscribe_ack_roundtrip():
 
 
 def test_cancel_roundtrip():
-    msg = Cancel(sender_id=Pid(id="consumer-1"), subscription_id="sub-1", reason="bye")
+    msg = Cancel(pid=Pid(id="consumer-1"), subscription_id="sub-1", reason="bye")
     pickled, decoded = _roundtrip(msg, Cancel)
     assert pickled.reason == "bye"
     assert decoded.subscription_id == "sub-1"
@@ -134,7 +135,7 @@ def test_cancel_roundtrip():
 
 
 def test_demand_roundtrip():
-    msg = Demand(sender_id=Pid(id="consumer-1"), subscription_id="sub-1", count=5)
+    msg = Demand(pid=Pid(id="consumer-1"), subscription_id="sub-1", count=5)
     pickled, decoded = _roundtrip(msg, Demand)
     assert pickled.count == 5
     assert decoded.count == 5
@@ -142,7 +143,7 @@ def test_demand_roundtrip():
 
 def test_events_roundtrip():
     msg = Events(
-        sender_id=Pid(id="producer-1"),
+        pid=Pid(id="producer-1"),
         subscription_id="sub-1",
         events=[1, 2, 3],
     )

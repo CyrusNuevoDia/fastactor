@@ -288,7 +288,7 @@ class GenStage(GenServer):
 
         await consumer.send(
             SubscribeAck(
-                sender_id=_pid_of(self),
+                pid=_pid_of(self),
                 subscription_id=sub_id,
                 opts=dict(opts),
             )
@@ -360,7 +360,7 @@ class GenStage(GenServer):
             try:
                 await info.peer.send(
                     Events(
-                        sender_id=_pid_of(self),
+                        pid=_pid_of(self),
                         subscription_id=sub_id,
                         events=batch,
                     )
@@ -421,7 +421,7 @@ class GenStage(GenServer):
         try:
             await info.peer.send(
                 Demand(
-                    sender_id=_pid_of(self),
+                    pid=_pid_of(self),
                     subscription_id=info.sub_id,
                     count=count,
                 )
@@ -508,7 +508,7 @@ class Consumer[E](GenStage):
         self._consumer_subs[sub_id] = info
         await producer.send(
             Subscribe(
-                sender_id=_pid_of(self),
+                pid=_pid_of(self),
                 subscription_id=sub_id,
                 opts=opts,
             )
@@ -525,7 +525,7 @@ class Consumer[E](GenStage):
         try:
             await info.peer.send(
                 Cancel(
-                    sender_id=_pid_of(self),
+                    pid=_pid_of(self),
                     subscription_id=sub_id,
                     reason=reason,
                 )
@@ -573,7 +573,7 @@ class ProducerConsumer[In, Out](GenStage):
         self._consumer_subs[sub_id] = info
         await producer.send(
             Subscribe(
-                sender_id=_pid_of(self),
+                pid=_pid_of(self),
                 subscription_id=sub_id,
                 opts=opts,
             )
@@ -591,7 +591,7 @@ class ProducerConsumer[In, Out](GenStage):
         try:
             await info.peer.send(
                 Cancel(
-                    sender_id=_pid_of(self),
+                    pid=_pid_of(self),
                     subscription_id=sub_id,
                     reason=reason,
                 )

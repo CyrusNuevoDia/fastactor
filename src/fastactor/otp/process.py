@@ -161,9 +161,7 @@ class Process:
                 self.monitored_by.pop(ref, None)
                 process._drop_monitor_ref(ref)
                 try:
-                    await process.send(
-                        Down(sender_id=_pid_of(self), reason=reason, ref=ref)
-                    )
+                    await process.send(Down(pid=_pid_of(self), reason=reason, ref=ref))
                 except Exception as error:
                     logger.error(
                         "%r sending Down(%s, %s, %s) to monitor: %s",
@@ -180,7 +178,7 @@ class Process:
                 self.unlink(process)
                 if process.trap_exits:
                     try:
-                        await process.send(Exit(sender_id=_pid_of(self), reason=reason))
+                        await process.send(Exit(pid=_pid_of(self), reason=reason))
                     except Exception as error:
                         logger.error(
                             "%r sending Exit(%s, %s) to linked actor: %s",
@@ -252,7 +250,7 @@ class Process:
         event = Event()
         caller._pending_calls[ref] = event
         callmsg = Call(
-            sender_id=_pid_of(caller),
+            pid=_pid_of(caller),
             message=request,
             ref=ref,
             metadata=metadata,
@@ -285,7 +283,7 @@ class Process:
     def monitor(self, other: "Process") -> str:
         ref = _monitor_ref()
         if other.has_stopped():
-            self.send_nowait(Down(sender_id=_pid_of(other), reason="noproc", ref=ref))
+            self.send_nowait(Down(pid=_pid_of(other), reason="noproc", ref=ref))
             return ref
 
         self.monitors[ref] = other
@@ -307,7 +305,7 @@ class Process:
             return message
         if telemetry.is_enabled():
             message.metadata = telemetry.inject(message.metadata)
-        sid = message.sender_id
+        sid = message.pid
         if sid is not None and not sid.node and "_sender_ref" not in message.__dict__:
             from .runtime import Runtime
 
@@ -334,9 +332,7 @@ class Process:
             return
 
         logger.debug("%s stop %s", self, reason)
-        self.send_nowait(
-            Stop(sender_id=_pid_of(sender or self.supervisor), reason=reason)
-        )
+        self.send_nowait(Stop(pid=_pid_of(sender or self.supervisor), reason=reason))
         with fail_after(timeout):
             await self.stopped()
 
@@ -359,9 +355,7 @@ class Process:
         metadata: dict[str, t.Any] | None = None,
     ):
         sender = sender or self.supervisor
-        self.send_nowait(
-            Info(sender_id=_pid_of(sender), message=message, metadata=metadata)
-        )
+        self.send_nowait(Info(pid=_pid_of(sender), message=message, metadata=metadata))
 
     async def handle_info(self, message: Info) -> Continue | None:
         return None

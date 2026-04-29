@@ -31,7 +31,7 @@ def _pid_of(proc: "Process | None") -> "Pid | None":
 
 
 class Message(msgspec.Struct, kw_only=True, tag="base", dict=True):
-    sender_id: "Pid | None" = None
+    pid: "Pid | None" = None
     metadata: dict[str, t.Any] | None = None
 
     @property
@@ -41,7 +41,7 @@ class Message(msgspec.Struct, kw_only=True, tag="base", dict=True):
         ref = self.__dict__.get("_sender_ref")
         if ref is not None:
             return ref
-        sid = self.sender_id
+        sid = self.pid
         if sid is None or sid.node:
             return None
         from .runtime import Runtime
