@@ -13,7 +13,7 @@ This file is **navigation, not a reference manual**. It gives you the mental mod
 - **Concurrency model:** `anyio` structured concurrency. Every actor runs inside the Runtime's `TaskGroup`; cancellation and teardown are propagated structurally.
 - **Python:** 3.13+.
 - **Mailbox:** bounded anyio memory object stream, capacity from `settings.mailbox_size` (default 1024, env var `FASTACTOR_MAILBOX_SIZE`).
-- **Framework envelopes:** built-in protocol messages are tagged `msgspec.Struct`s carrying `sender_id: Pid | None` plus optional `metadata`. Use `message.sender_id` for stable identity; `message.sender` is a convenience that resolves back to the live local `Process` when possible. Raw `proc.send(obj)` still places arbitrary Python objects on the mailbox unwrapped.
+- **Framework envelopes:** built-in protocol messages are tagged `msgspec.Struct`s carrying `pid: Pid | None` plus optional `metadata`. Use `message.pid` for stable identity; `message.sender` is a convenience that resolves back to the live local `Process` when possible. Raw `proc.send(obj)` still places arbitrary Python objects on the mailbox unwrapped.
 
 ### Where to go next
 
@@ -47,6 +47,16 @@ Both columns show the **call you actually write** — your subclass / module on 
 | `Task.async(fn)` / `Task.async_nolink(fn)`              | `await Task.start_link(fn)` / `await Task.start(fn)`      | `start_link` cascades a crash to caller; `start` does not. Consume with `result = await t`.  |
 
 The names match where the Python idiom allows; divergences are intentional and annotated.
+
+### `handle_continue` return shapes
+
+| Return value     | Meaning                                                          |
+| ---------------- | ---------------------------------------------------------------- |
+| `None`           | Continue the loop; read the next mailbox message.                |
+| `Continue(term)` | Run `handle_continue(term)` again before the next mailbox read.  |
+| `Stop(reason)`   | Terminate the process with that reason.                          |
+
+**Footgun:** if `init` returns `Continue(...)` and the very first `handle_continue` returns `Stop(...)`, `start_link` may still report success and the process exits immediately after. Symptom: `start_link` returned, but the pid is dead by the time you send to it. If init might need to bail, return `Stop(reason)` from `init` itself, not from that first `handle_continue`.
 
 ---
 
@@ -158,13 +168,24 @@ Accepts either a string (global name, registered via `name=` at start) or a `(re
 
 **Source:** [`_messages.py`](src/fastactor/otp/_messages.py)
 
-The mailbox transports tagged `msgspec.Struct` envelopes. The base `Message` carries `sender_id: Pid | None` and an optional `metadata: dict[str, Any]`. Concrete variants:
+The mailbox transports tagged `msgspec.Struct` envelopes. The base `Message` carries `pid: Pid | None` and an optional `metadata: dict[str, Any]`. Concrete variants:
 
 - **Generic OTP control:** `Info`, `Stop`, `Exit`, `Down`, `Continue`, `Ignore`.
 - **Synchronous request/reply:** `Call[Req, Res]` (carries a `ref: str`); reply envelope `CallReply` (`ref`, `result`).
 - **Fire-and-forget:** `Cast[Req]`.
 - **GenStage subscription protocol:** `Subscribe`, `SubscribeAck`, `Demand`, `Events`, `Cancel`.
 - **Wire-safe crash payload:** `CrashReason` (frozen `msgspec.Struct` with `class_name`, `repr`, `traceback_str` — uses `tblib` if installed).
+
+Shape-wise, the OTP envelopes look like this:
+
+```python
+Call(message=req, ref="...", pid=caller_pid, metadata={...})
+Cast(message=req, pid=caller_pid, metadata={...})
+Exit(pid=other_pid, reason=reason, metadata={...})
+Down(pid=other_pid, ref=ref, reason=reason, metadata={...})
+```
+
+**v0.x rename:** the stored message field `sender_id` is now `pid` (`Pid` is already serializable, so the extra `_id` bought nothing). The `.sender` property still returns a live `Process | None`, and the `sender=` keyword on APIs like `Process.stop(reason, sender=self)` is unchanged — those refer to the actor object, not its identifier. The `pid` field on `Down` lines up with Elixir's `{:DOWN, ref, :process, pid, reason}` tuple.
 
 ### `Pid` is the stable identity
 
@@ -174,7 +195,7 @@ class Pid(msgspec.Struct, frozen=True):
     node: str = ""        # "" → local; non-empty → remote (future)
 ```
 
-`Pid` is what gets stamped onto every framework message. `message.sender_id` is the durable handle. `message.sender` is a property that resolves it back to a live local `Process` via `Runtime.current().processes`, falling back to a strong `_sender_ref` stashed at send time. The fallback means **a message can outlive its sender** — `message.sender` may still return the original `Process` even after it has terminated and been unregistered.
+`Pid` is what gets stamped onto every framework message. `message.pid` is the durable handle. `message.sender` is a property that resolves it back to a live local `Process` via `Runtime.current().processes`, falling back to a strong `_sender_ref` stashed at send time. The fallback means **a message can outlive its sender** — `message.sender` may still return the original `Process` even after it has terminated and been unregistered.
 
 ### The deferred-reply mechanism
 
@@ -241,6 +262,8 @@ class Watchdog(GenServer):
         logger.error("child %s died: %s", msg.sender, msg.reason)
         # decide: restart? page? escalate?
 ```
+
+Elixir routes `:DOWN` through `handle_info`. fastactor splits monitor notifications into `handle_down(self, message: Down)` for type safety. That's a clean divergence: a typed callback beats tuple-matching inside `handle_info`. If you are porting Elixir code, treat `handle_down` as the `:DOWN` clause you used to keep inside `handle_info`.
 
 ### 6. Task for bounded parallelism
 
@@ -322,15 +345,15 @@ async def handle_call(self, call: Call):
 
 ### `current_process` chooses the default outbound sender; `message.sender` is resolved
 
-Inside a callback, the `current_process` ContextVar is set to the handling process, so `server.call(req)` / `server.cast(req)` default `sender` to `self` when you omit it. But received envelopes store `sender_id: Pid | None`, not a raw `Process`. `message.sender` is a property that resolves `sender_id` through `Runtime.current().processes` or a send-time `_sender_ref`. If you need durable identity, or you see `message.sender is None`, inspect `message.sender_id`. (`Process.info()` still defaults to the supervisor unless you pass `sender=` explicitly.)
+Inside a callback, the `current_process` ContextVar is set to the handling process, so `server.call(req)` / `server.cast(req)` default `sender` to `self` when you omit it. But received envelopes store `pid: Pid | None`, not a raw `Process`. `message.sender` is a property that resolves `pid` through `Runtime.current().processes` or a send-time `_sender_ref`. If you need durable identity, or you see `message.sender is None`, inspect `message.pid`. (`Process.info()` still defaults to the supervisor unless you pass `sender=` explicitly.)
 
 ### `Pid` is identity; `Process` is the live object
 
-Use `Pid` / `message.sender_id` for durable identity and equality across messages. `Process.__eq__` only compares with other `Process` instances by `id`; a `Pid` and a `Process` are different types and do not compare equal.
+Use `Pid` / `message.pid` for durable identity and equality across messages. `Process.__eq__` only compares with other `Process` instances by `id`; a `Pid` and a `Process` are different types and do not compare equal.
 
-### `message.sender` may be `None` even when `sender_id` is present
+### `message.sender` may be `None` even when `pid` is present
 
-Returns `None` for remote pids (`sender_id.node != ""`), unresolved local ids (process already torn down with no `_sender_ref`), or messages decoded outside an active `Runtime`.
+Returns `None` for remote pids (`message.pid.node != ""`), unresolved local ids (process already torn down with no `_sender_ref`), or messages decoded outside an active `Runtime`.
 
 ### `CallReply` exists, but the local `call()` path does not currently emit it
 
@@ -348,6 +371,16 @@ Treat `CallReply` as an exported wire envelope type, not as the mechanism `await
 
 Only `"normal"`, `"shutdown"`, and `Shutdown(...)` are normal. Anything else — including `None`, `""`, `"ok"` — is treated as abnormal and cascades across links / triggers `transient` restarts. `is_normal_shutdown_reason` in `_exceptions.py` is the single source of truth.
 
+### Restart types are the OTP three
+
+| `restart`   | Normal exit   | Crash         |
+| ----------- | ------------- | ------------- |
+| `permanent` | restart       | restart       |
+| `transient` | don't restart | restart       |
+| `temporary` | don't restart | don't restart |
+
+**There is no `notify_only` policy.** `temporary` already covers the "owner decides what happens next" case: never restart, monitors still get `Down`, and the spec slot is freed for reuse with the same id after terminal exit cleanup. If you want owner-driven retry, make the child `temporary` and call `monitor` from the orchestrator.
+
 ### `brutal_kill` skips `terminate`
 
 A child with `shutdown="brutal_kill"` has its mailbox closed immediately. `terminate()` won't run to completion, which means monitors may still see `Down` but cleanup you wrote in `terminate` won't fire. Use integer timeouts by default.
@@ -355,6 +388,21 @@ A child with `shutdown="brutal_kill"` has its mailbox closed immediately. `termi
 ### `DynamicSupervisor` only supports `one_for_one`
 
 Passing any other strategy raises `ValueError` in `init`. The error surfaces as the original exception from `start()` — don't waste time trying `"one_for_all"` there.
+
+If what you want is "start this child and tell me when it dies," keep the OTP sequence explicit:
+
+```python
+# Get a Down message when the child exits — same as Elixir.
+pid = await dsup.start_child(spec)
+ref = parent.monitor(pid)   # the supervisor doesn't notify the caller
+
+# Later — receive the notification:
+async def handle_down(self, message: Down):
+    if message.ref == ref:
+        ...
+```
+
+**There is no `start_and_monitor_child` helper** because BEAM doesn't have one either. `start_child` then `monitor` is the OTP idiom.
 
 ### `register_name` vs `Registry.register`
 
