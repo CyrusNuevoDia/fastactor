@@ -1,7 +1,8 @@
 import pytest
-from .helpers import CounterServer, EchoServer
+from .helpers import CounterServer, EchoServer, await_child_restart
 
 from fastactor.otp import AlreadyRegistered, Failed, Registry, Runtime
+from fastactor.otp.registry import RegistryServer
 
 pytestmark = pytest.mark.anyio
 
@@ -122,6 +123,74 @@ async def test_registry_concurrent_unique_register_raises_for_losers():
 
     for proc in procs:
         await proc.stop("normal")
+
+
+async def test_registry_start_link_returns_supervised_process(make_supervisor):
+    """G: a supervisor-owned registry. W: we use Registry.start_link and stop the supervisor. T: the registry behaves normally and is cleaned up with the supervisor."""
+    sup = await make_supervisor()
+    registry_proc = await Registry.start_link(
+        name="supervised-reg",
+        keys="unique",
+        supervisor=sup,
+    )
+    worker = await CounterServer.start()
+
+    assert isinstance(registry_proc, RegistryServer)
+    assert any(running.process is registry_proc for running in sup.children.values())
+
+    await Registry.register("supervised-reg", "alpha", worker)
+
+    assert await Registry.lookup("supervised-reg", "alpha") == [worker]
+
+    await sup.stop("normal")
+
+    assert registry_proc.has_stopped()
+    assert "supervised-reg" not in Runtime.current().registries
+
+    await worker.stop("normal")
+
+
+async def test_registry_under_supervision_tree_restartable(make_supervisor):
+    """G: a registry child with restart=permanent. W: it crashes. T: the supervisor restarts it with a fresh empty registry entry."""
+    sup = await make_supervisor()
+    registry_proc = await sup.start_child(
+        sup.child_spec(
+            "registry",
+            RegistryServer,
+            kwargs={"name": "restart-reg", "keys": "unique"},
+            restart="permanent",
+        )
+    )
+    worker = await CounterServer.start()
+
+    await Registry.register("restart-reg", "alpha", worker)
+    original_entry = Runtime.current().registries["restart-reg"]
+
+    await registry_proc.stop(RuntimeError("registry crash"))
+    restarted = await await_child_restart(sup, "registry", registry_proc)
+
+    assert restarted is not registry_proc
+    assert Runtime.current().registries["restart-reg"] is not original_entry
+    assert await Registry.lookup("restart-reg", "alpha") == []
+
+    await Registry.register("restart-reg", "alpha", worker)
+
+    assert await Registry.lookup("restart-reg", "alpha") == [worker]
+
+    await worker.stop("normal")
+    await sup.stop("normal")
+
+
+async def test_registry_new_still_works_after_refactor():
+    """G: the legacy Registry.new API. W: we create and use a registry. T: existing register/lookup behavior still works."""
+    await Registry.new("legacy-reg", "unique")
+    worker = await CounterServer.start()
+
+    await Registry.register("legacy-reg", "alpha", worker)
+
+    assert await Registry.lookup("legacy-reg", "alpha") == [worker]
+
+    await worker.stop("normal")
 
 
 # ---------------------------------------------------------------------------

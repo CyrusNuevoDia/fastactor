@@ -8,10 +8,14 @@ See `src/fastactor/otp/README.md#registry`.
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
+from .gen_server import GenServer
 from .process import Process
 from .runtime import Runtime, _RegistryEntry
+
+if TYPE_CHECKING:
+    from .supervisor import Supervisor
 
 logger = logging.getLogger(__name__)
 
@@ -22,18 +26,84 @@ class AlreadyRegistered(Exception):
         super().__init__(f"already registered: {pid}")
 
 
-class Registry:
-    @classmethod
-    async def new(cls, name: str, mode: Literal["unique", "duplicate"]) -> None:
-        if mode not in ("unique", "duplicate"):
-            raise ValueError(f"Invalid registry mode: {mode}")
+def _validate_registry_mode(
+    mode: Literal["unique", "duplicate"],
+) -> Literal["unique", "duplicate"]:
+    if mode not in ("unique", "duplicate"):
+        raise ValueError(f"Invalid registry mode: {mode}")
+    return mode
 
+
+def _registry_child_id(name: str) -> str:
+    return f"registry:{name}"
+
+
+class RegistryServer(GenServer):
+    name: str
+
+    async def init(self, name: str, keys: Literal["unique", "duplicate"]) -> None:
+        self.name = name
         runtime = Runtime.current()
+        mode = _validate_registry_mode(keys)
+
         async with runtime._registry_lock:
             if name in runtime.registries:
                 raise ValueError(f"Registry already exists: {name}")
 
             runtime.registries[name] = _RegistryEntry(mode=mode)
+
+    async def _system_teardown(self, reason: Any) -> None:
+        runtime = Runtime.current()
+        async with runtime._registry_lock:
+            runtime.registries.pop(self.name, None)
+        await super()._system_teardown(reason)
+
+    @classmethod
+    async def start_link(
+        cls,
+        *,
+        name: str,
+        keys: Literal["unique", "duplicate"],
+        supervisor: "Supervisor | None" = None,
+    ) -> "RegistryServer":
+        return cast(
+            "RegistryServer",
+            await cls._spawn(
+                name,
+                _validate_registry_mode(keys),
+                supervisor=supervisor,
+                link=True,
+            ),
+        )
+
+
+class Registry:
+    @classmethod
+    async def new(cls, name: str, mode: Literal["unique", "duplicate"]) -> None:
+        await RegistryServer.start_link(name=name, keys=mode)
+
+    @classmethod
+    async def start_link(
+        cls,
+        *,
+        name: str,
+        keys: Literal["unique", "duplicate"],
+        supervisor: "Supervisor | None" = None,
+    ) -> RegistryServer:
+        runtime = Runtime.current()
+        mode = _validate_registry_mode(keys)
+        supervisor = supervisor or runtime.supervisor
+
+        if supervisor is None:
+            raise RuntimeError("No supervisor is currently active.")
+
+        spec = supervisor.child_spec(
+            _registry_child_id(name),
+            RegistryServer,
+            kwargs={"name": name, "keys": mode},
+            restart="permanent",
+        )
+        return await supervisor.start_child(spec)
 
     @classmethod
     async def register(cls, name: str, key: Any, proc: Process) -> None:
@@ -154,4 +224,4 @@ class Registry:
             ]
 
 
-__all__ = ["AlreadyRegistered", "Registry"]
+__all__ = ["AlreadyRegistered", "Registry", "RegistryServer"]
