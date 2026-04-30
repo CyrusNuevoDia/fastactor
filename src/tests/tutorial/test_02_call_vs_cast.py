@@ -55,9 +55,10 @@ class ManualRpcWorker:
         self._stop = anyio.Event()
 
     async def run(self) -> None:
-        async for req_id, payload in self._inbox_rx:
-            self._replies[req_id] = payload.upper()
-            self._pending[req_id].set()
+        async with self._inbox_rx:
+            async for req_id, payload in self._inbox_rx:
+                self._replies[req_id] = payload.upper()
+                self._pending[req_id].set()
 
     async def call(self, payload: str) -> str:
         req_id = uuid4().hex

@@ -591,6 +591,12 @@ class Supervisor(Process):
                     await super()._loop()
                 finally:
                     task_group.cancel_scope.cancel()
+                    if self._strategy_updates_send is not None:
+                        await self._strategy_updates_send.aclose()
+                        self._strategy_updates_send = None
+                    if self._strategy_updates_receive is not None:
+                        await self._strategy_updates_receive.aclose()
+                        self._strategy_updates_receive = None
         except Exception as error:
             unwrapped = self._unwrap_exception_group(error)
             if self.has_stopped():

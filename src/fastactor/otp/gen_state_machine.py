@@ -190,11 +190,12 @@ class GenStateMachine(Process):
     async def _loop(self) -> None:
         if self._mailbox is None:
             return
+        assert self._inbox is not None
 
         reason: t.Any = "normal"
 
         try:
-            async with self._mailbox:
+            async with self._inbox, self._mailbox:
                 logger.debug("%s loop started", self)
                 await self._emit("started")
                 self._started.set()

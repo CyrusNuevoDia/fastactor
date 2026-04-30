@@ -81,13 +81,9 @@ class Process:
     _pending_calls: dict[str, Event] = field(default_factory=dict, init=False)
     _pending_results: dict[str, t.Any] = field(default_factory=dict, init=False)
     _proc_timer_tg: TaskGroup | None = field(default=None, init=False)
-    _proc_timers: dict[int, anyio.CancelScope] = field(
-        default_factory=dict, init=False
-    )
+    _proc_timers: dict[int, anyio.CancelScope] = field(default_factory=dict, init=False)
     _proc_next_timer_id: int = field(default=0, init=False)
-    _proc_timer_fire_times: dict[int, float] = field(
-        default_factory=dict, init=False
-    )
+    _proc_timer_fire_times: dict[int, float] = field(default_factory=dict, init=False)
     _proc_interval_timers: set[int] = field(default_factory=set, init=False)
     _proc_named_timers: dict[str, TimerRef] = field(default_factory=dict, init=False)
 
@@ -591,6 +587,12 @@ class Process:
             self._proc_timer_fire_times = {}
             self._proc_interval_timers = set()
             self._proc_named_timers = {}
+            # Idempotent close — covers subclasses like Task whose custom _loop
+            # never wraps the streams in `async with`.
+            if self._inbox is not None:
+                await self._inbox.aclose()
+            if self._mailbox is not None:
+                await self._mailbox.aclose()
 
     async def _run_in_process_context[R](
         self,
@@ -620,6 +622,7 @@ class Process:
     async def _loop(self):
         if self._mailbox is None:
             return
+        assert self._inbox is not None
 
         reason: t.Any = "normal"
 
