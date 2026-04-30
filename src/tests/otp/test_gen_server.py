@@ -724,3 +724,122 @@ async def test_4_9_reply_allows_decoupled_reply_from_later_event() -> None:
 
     assert reply == 42
     await srv.stop("normal")
+
+
+class StopFromInitContinueServer(GenServer):
+    async def init(self, gate: Event, reason: Any = "normal") -> Continue:
+        self.gate = gate
+        self.reason = reason
+        self.terminate_reason: Any = None
+        return Continue("foo")
+
+    async def handle_continue(self, term: Any) -> Stop:
+        assert term == "foo"
+        await self.gate.wait()
+        return Stop(pid=None, reason=self.reason)
+
+    async def terminate(self, reason: Any) -> None:
+        self.terminate_reason = reason
+        await super().terminate(reason)
+
+
+class StopFromCallContinueServer(GenServer):
+    async def init(self, gate: Event) -> None:
+        self.gate = gate
+        self.continue_entered = Event()
+
+    async def handle_call(self, call: Call) -> tuple[str, Continue]:
+        return ("value", Continue("end"))
+
+    async def handle_continue(self, term: Any) -> Stop:
+        assert term == "end"
+        self.continue_entered.set()
+        await self.gate.wait()
+        return Stop(pid=None, reason="normal")
+
+
+async def test_handle_continue_from_init_can_stop_normally(supervisor) -> None:
+    """SPEC Task A: handle_continue may return Stop("normal") after init Continue."""
+    gate = Event()
+    monitor = await MonitorServer.start(supervisor=supervisor)
+    srv = await StopFromInitContinueServer.start_link(
+        gate,
+        reason="normal",
+        supervisor=supervisor,
+    )
+    monitor.monitor(srv)
+
+    gate.set()
+    await srv.stopped()
+    downs = await monitor.await_events(1)
+
+    assert downs[0].reason == "normal"
+    assert srv.terminate_reason == "normal"
+
+    await monitor.stop("normal")
+
+
+async def test_handle_continue_from_init_can_stop_with_reason(supervisor) -> None:
+    """SPEC Task A: handle_continue Stop(reason) preserves the reason."""
+    gate = Event()
+    monitor = await MonitorServer.start(supervisor=supervisor)
+    srv = await StopFromInitContinueServer.start_link(
+        gate,
+        reason="boom",
+        supervisor=supervisor,
+    )
+    monitor.monitor(srv)
+
+    gate.set()
+    await srv.stopped()
+    downs = await monitor.await_events(1)
+
+    assert downs[0].reason == "boom"
+
+    await monitor.stop("normal")
+
+
+async def test_handle_call_continue_replies_before_continue_stop(supervisor) -> None:
+    """SPEC Task A: handle_call replies before handle_continue Stop terminates."""
+    gate = Event()
+    monitor = await MonitorServer.start(supervisor=supervisor)
+    srv = await StopFromCallContinueServer.start_link(gate, supervisor=supervisor)
+    monitor.monitor(srv)
+
+    assert await srv.call("go") == "value"
+    with fail_after(2):
+        await srv.continue_entered.wait()
+    assert not srv.has_stopped()
+
+    gate.set()
+    await srv.stopped()
+    downs = await monitor.await_events(1)
+
+    assert downs[0].reason == "normal"
+
+    await monitor.stop("normal")
+
+
+async def test_handle_continue_annotation_accepts_stop(supervisor) -> None:
+    """SPEC Task A: user handle_continue overrides may include Stop in the type."""
+
+    class TypedStopContinueServer(GenServer):
+        async def init(self, gate: Event) -> Continue:
+            self.gate = gate
+            self.seen: list[Any] = []
+            return Continue("typed")
+
+        async def handle_continue(self, term: Any) -> Continue | Stop | None:
+            self.seen.append(term)
+            await self.gate.wait()
+            return Stop(pid=None, reason="normal")
+
+    gate = Event()
+    srv = await TypedStopContinueServer.start_link(gate, supervisor=supervisor)
+
+    assert isinstance(srv, TypedStopContinueServer)
+
+    gate.set()
+    await srv.stopped()
+
+    assert srv.seen == ["typed"]

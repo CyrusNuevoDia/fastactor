@@ -29,6 +29,7 @@ ATTR_MESSAGE_TYPE = "fastactor.message.type"
 ATTR_MESSAGE_SENDER_ID = "fastactor.message.sender.id"
 ATTR_TARGET_ID = "fastactor.target.id"
 ATTR_TARGET_CLASS = "fastactor.target.class"
+ATTR_TIMER_KIND = "fastactor.timer.kind"
 ATTR_CALL_TIMEOUT = "fastactor.call.timeout"
 ATTR_SUPERVISOR_NAME = "fastactor.supervisor.name"
 ATTR_CHILD_ID = "fastactor.child.id"
@@ -267,6 +268,7 @@ __all__ = [
     "ATTR_MESSAGE_SENDER_ID",
     "ATTR_TARGET_ID",
     "ATTR_TARGET_CLASS",
+    "ATTR_TIMER_KIND",
     "ATTR_CALL_TIMEOUT",
     "ATTR_SUPERVISOR_NAME",
     "ATTR_CHILD_ID",

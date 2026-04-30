@@ -29,7 +29,7 @@ async def handle_down(self, message: Down):
     """Called on monitored-process termination. Default base-class no-op — override to react.
     `Down` also lands in `handle_info` when routed through the mailbox; GenServer uses that path."""
 
-async def handle_continue(self, term: Any):
+async def handle_continue(self, term: Any) -> Continue | Stop | None:
     """Runs next after a callback returns Continue(term)."""
 
 async def on_terminate(self, reason: Any):
@@ -57,12 +57,27 @@ proc.send_nowait(msg)               # raises if full
 await proc.stop(reason="normal", timeout=60, sender=None)
 await proc.kill()                   # closes the mailbox, unwinds immediately
 proc.info(msg, sender=None)         # wraps in Info(sender, msg) and send_nowait
+ref = proc.send_after(50, "tick")   # deliver Info("tick") after 50 ms
+proc.cancel_timer(ref)              # approximate ms remaining, or None
+ref = proc.start_interval(1000, "tick")
+ref = proc.reschedule("tick", 1000, "tick")
 
 # Lifecycle observation
 proc.has_started() -> bool
 await proc.started() -> Self        # waits until init completes
 proc.has_stopped() -> bool
 await proc.stopped() -> Self        # waits until terminate completes
+```
+
+Timers are owned by the process that creates them and are cancelled automatically
+when that process exits. `target=` can point at another process; delivery is
+silently dropped if the target has already stopped.
+
+Use `reschedule` for a named self-timer when repeated calls should leave only the
+latest pending message.
+
+```python
+self.reschedule("tick", 1000, "tick")
 ```
 
 ### Init return sentinels
@@ -520,6 +535,8 @@ Elixir-style `{:continue, term}`. Schedules a follow-up callback without re-ente
 - `init` may return `Continue(term)` → `handle_continue(term)` runs before the first mailbox read.
 - `handle_call` may return `(reply, Continue(term))` → caller gets `reply`, then `handle_continue(term)` runs before the next message.
 - `handle_cast` / `handle_info` may return `Continue(term)` → `handle_continue(term)` runs next.
+
+`handle_continue` may return `Continue(term)` to chain, `Stop(reason=...)` to stop with that reason, or `None` to resume the mailbox loop.
 
 ### Deferred init
 

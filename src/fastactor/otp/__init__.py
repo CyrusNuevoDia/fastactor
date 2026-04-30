@@ -45,7 +45,7 @@ from .gen_state_machine import (
     StateTimeout,
     Timeout,
 )
-from .process import Process
+from .process import Process, TimerRef
 from .registry import AlreadyRegistered, Registry
 from .runtime import CrashRecord, Runtime, whereis
 from .supervisor import (
@@ -112,6 +112,7 @@ __all__ = [
     "SwapHandler",
     "Task",
     "TaskSupervisor",
+    "TimerRef",
     "Timeout",
     "whereis",
 ]

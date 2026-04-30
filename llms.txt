@@ -37,6 +37,10 @@ Both columns show the **call you actually write** — your subclass / module on 
 | `{:noreply, state}` / `GenServer.reply(from, v)`        | `return None`, then later `call.set_result(v)`            | No sentinel class — `None` means "don't reply yet"; the server stashes the `Call` and resolves it later. Internally `Call` carries a `ref` and `set_result` resolves the caller's pending slot. |
 | `{:stop, reason, reply, state}`                         | `return (reply, Stop(reason))`                            | Caller gets `reply`, then the server stops with `reason`. Symmetric with `(reply, Continue(term))`. |
 | `{:noreply, state, {:continue, arg}}`                   | `return Continue("arg")`                                  | `handle_continue` runs next, before the next mailbox read.                                   |
+| `Process.send_after(pid, msg, ms)`                      | `proc.send_after(50, msg, target=other)`                  | Returns a cancellable `TimerRef`. `target=` defaults to `self`. Auto-cancelled on process exit. |
+| `:erlang.cancel_timer(ref)`                             | `proc.cancel_timer(ref)`                                  | Returns approximate ms remaining, or `None` if already fired/unknown. Idempotent.            |
+| `:timer.send_interval(ms, msg)`                         | `proc.start_interval(20, "tick")`                         | Periodic; first fire after `ms`. Reschedule-on-fire (no pile-up). Cancel via `cancel_timer`. |
+| named-timer rescheduling (BEAM idiom)                   | `proc.reschedule("tick", 1000, "tick")`                   | Cancel any prior timer named `"tick"` and schedule a new one. Idempotent.                    |
 | `{:via, Registry, {R, key}}`                            | `await Worker.start(via=("R", key))`                      | Mutually exclusive with `name=`. Also returns by `whereis(("R", key))`.                      |
 | `Process.link(pid)` / `Process.monitor(pid)`            | `proc.link(other)` / `proc.monitor(other)`                | Bidirectional link; unidirectional monitor emits `Down` when the target terminates.          |
 | `Process.flag(:trap_exit, true)`                        | `await MyWorker.start_link(trap_exits=True)`              | Convert link cascades to `handle_exit(message: Exit)` callbacks.                             |
@@ -54,9 +58,9 @@ The names match where the Python idiom allows; divergences are intentional and a
 | ---------------- | ---------------------------------------------------------------- |
 | `None`           | Continue the loop; read the next mailbox message.                |
 | `Continue(term)` | Run `handle_continue(term)` again before the next mailbox read.  |
-| `Stop(reason)`   | Terminate the process with that reason.                          |
+| `Stop(reason)`   | Terminate the process with that reason; same shape as `handle_cast` / `handle_info`. |
 
-**Footgun:** if `init` returns `Continue(...)` and the very first `handle_continue` returns `Stop(...)`, `start_link` may still report success and the process exits immediately after. Symptom: `start_link` returned, but the pid is dead by the time you send to it. If init might need to bail, return `Stop(reason)` from `init` itself, not from that first `handle_continue`.
+If `init` returns `Continue(...)` and the very first `handle_continue` returns `Stop(...)`, `start_link` still returns success and the process exits cleanly afterward (a monitor sees the `Down` with the chosen reason). To bail before the loop ever starts, return `Stop(reason)` from `init` itself instead.
 
 ---
 
@@ -89,6 +93,7 @@ These primitives don't yet have dedicated sections in `otp/README.md` — read t
 | `Agent`                       | Tiny state-holder over `GenServer`                                   | [`agent.py`](src/fastactor/otp/agent.py)                                                        | [README §Agent](src/fastactor/otp/README.md#agent)                                            |
 | `Task`, `TaskSupervisor`      | One-shot awaitable coroutines, linked or unlinked                    | [`task.py`](src/fastactor/otp/task.py)                                                          | [README §Task & TaskSupervisor](src/fastactor/otp/README.md#task--tasksupervisor)            |
 | `handle_continue`             | Post-callback continuations                                          | [`process.py`](src/fastactor/otp/process.py), [`gen_server.py`](src/fastactor/otp/gen_server.py) | [README §handle_continue](src/fastactor/otp/README.md#handle_continue)                       |
+| Process timers                | `send_after` / `cancel_timer` / `start_interval` / `reschedule`      | [`process.py`](src/fastactor/otp/process.py)                                                    | [README §Process](src/fastactor/otp/README.md#process)                                       |
 | Named registration            | `name=` (global) vs `via=(registry, key)` at `start()`               | [`runtime.py`](src/fastactor/otp/runtime.py), [`registry.py`](src/fastactor/otp/registry.py)    | [README §Named registration](src/fastactor/otp/README.md#named-registration-at-start)        |
 
 ### Advanced primitives

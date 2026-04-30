@@ -10,6 +10,7 @@ import logging
 import typing as t
 from dataclasses import dataclass, field
 
+import anyio
 from anyio import (
     BrokenResourceError,
     ClosedResourceError,
@@ -18,6 +19,7 @@ from anyio import (
     create_memory_object_stream,
     fail_after,
 )
+from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from pyee import EventEmitter
 
@@ -46,6 +48,13 @@ logger = logging.getLogger(__name__)
 _monitor_ref = id_generator("monitor")
 
 
+@dataclass(frozen=True, slots=True)
+class TimerRef:
+    """Opaque handle returned by send_after / start_interval."""
+
+    _id: int
+
+
 @dataclass(repr=False)
 class Process:
     id: str = field(default_factory=id_generator("process"))
@@ -71,6 +80,16 @@ class Process:
     _ignored_down_refs: set[str] = field(default_factory=set, init=False)
     _pending_calls: dict[str, Event] = field(default_factory=dict, init=False)
     _pending_results: dict[str, t.Any] = field(default_factory=dict, init=False)
+    _proc_timer_tg: TaskGroup | None = field(default=None, init=False)
+    _proc_timers: dict[int, anyio.CancelScope] = field(
+        default_factory=dict, init=False
+    )
+    _proc_next_timer_id: int = field(default=0, init=False)
+    _proc_timer_fire_times: dict[int, float] = field(
+        default_factory=dict, init=False
+    )
+    _proc_interval_timers: set[int] = field(default_factory=set, init=False)
+    _proc_named_timers: dict[str, TimerRef] = field(default_factory=dict, init=False)
 
     emitter: EventEmitter = field(default_factory=EventEmitter, init=False)
 
@@ -137,7 +156,7 @@ class Process:
     async def handle_down(self, message: Down) -> None:
         pass
 
-    async def handle_continue(self, term: t.Any) -> Continue | None:
+    async def handle_continue(self, term: t.Any) -> Continue | Stop | None:
         return None
 
     async def on_terminate(self, reason: t.Any) -> None:
@@ -145,6 +164,7 @@ class Process:
 
     async def terminate(self, reason: t.Any) -> None:
         """User-overridable lifecycle callback. Override for custom cleanup."""
+        self._teardown_proc_timers()
         logger.debug("%s terminate reason=%s", self, reason)
         try:
             await self.on_terminate(reason)
@@ -360,6 +380,190 @@ class Process:
     async def handle_info(self, message: Info) -> Continue | None:
         return None
 
+    def _next_proc_timer_ref(self) -> TimerRef:
+        self._proc_next_timer_id += 1
+        return TimerRef(self._proc_next_timer_id)
+
+    def _require_proc_timer_tg(self) -> TaskGroup:
+        if self._proc_timer_tg is None:
+            raise RuntimeError("process not running")
+        return self._proc_timer_tg
+
+    def _send_timer_info(
+        self,
+        target: "Process",
+        message: object,
+        *,
+        kind: str,
+        ack: Event | None = None,
+    ) -> bool:
+        info = Info(pid=_pid_of(self), message=message)
+        if ack is not None:
+            info.__dict__["_timer_ack"] = ack
+
+        if telemetry.is_enabled():
+            with telemetry.get_tracer().start_as_current_span(
+                "fastactor.process.timer_fire",
+                attributes={
+                    telemetry.ATTR_TARGET_ID: target.id,
+                    telemetry.ATTR_TARGET_CLASS: type(target).__name__,
+                    telemetry.ATTR_TIMER_KIND: kind,
+                },
+            ) as span:
+                try:
+                    target.send_nowait(info)
+                except (BrokenResourceError, ClosedResourceError):
+                    return False
+                except BaseException as err:
+                    telemetry.record_exception(span, err)
+                    raise
+            return True
+
+        try:
+            target.send_nowait(info)
+        except (BrokenResourceError, ClosedResourceError):
+            return False
+        return True
+
+    async def _run_send_after_timer(
+        self,
+        timer_id: int,
+        delay_s: float,
+        message: object,
+        target: "Process",
+        scope: anyio.CancelScope,
+    ) -> None:
+        try:
+            with scope:
+                await anyio.sleep(delay_s)
+                self._send_timer_info(target, message, kind="send_after")
+        finally:
+            if self._proc_timers.get(timer_id) is scope:
+                self._proc_timers.pop(timer_id, None)
+                self._proc_timer_fire_times.pop(timer_id, None)
+                self._proc_interval_timers.discard(timer_id)
+
+    async def _run_interval_timer(
+        self,
+        timer_id: int,
+        interval_s: float,
+        message: object,
+        target: "Process",
+        scope: anyio.CancelScope,
+    ) -> None:
+        try:
+            with scope:
+                while True:
+                    self._proc_timer_fire_times[timer_id] = (
+                        anyio.current_time() + interval_s
+                    )
+                    await anyio.sleep(interval_s)
+                    ack = (
+                        Event()
+                        if getattr(target._loop, "__func__", None) is Process._loop
+                        else None
+                    )
+                    if self._send_timer_info(target, message, kind="interval", ack=ack):
+                        if ack is not None:
+                            await ack.wait()
+        finally:
+            if self._proc_timers.get(timer_id) is scope:
+                self._proc_timers.pop(timer_id, None)
+                self._proc_timer_fire_times.pop(timer_id, None)
+                self._proc_interval_timers.discard(timer_id)
+
+    def send_after(
+        self,
+        delay_ms: int,
+        message: object,
+        *,
+        target: "Process | None" = None,
+    ) -> TimerRef:
+        timer_tg = self._require_proc_timer_tg()
+        target = target or self
+        ref = self._next_proc_timer_ref()
+        scope = anyio.CancelScope()
+        delay_s = max(delay_ms, 0) / 1000
+        self._proc_timers[ref._id] = scope
+        self._proc_timer_fire_times[ref._id] = anyio.current_time() + delay_s
+        timer_tg.start_soon(
+            self._run_send_after_timer,
+            ref._id,
+            delay_s,
+            message,
+            target,
+            scope,
+        )
+        return ref
+
+    def cancel_timer(self, ref: TimerRef) -> int | None:
+        scope = self._proc_timers.get(ref._id)
+        if scope is None:
+            return None
+
+        fire_time = self._proc_timer_fire_times.get(ref._id)
+        if fire_time is None:
+            scope.cancel()
+            self._proc_timers.pop(ref._id, None)
+            return None
+
+        remaining_s = fire_time - anyio.current_time()
+        if remaining_s <= 0 and ref._id not in self._proc_interval_timers:
+            return None
+
+        scope.cancel()
+        self._proc_timers.pop(ref._id, None)
+        self._proc_timer_fire_times.pop(ref._id, None)
+        self._proc_interval_timers.discard(ref._id)
+        if remaining_s <= 0:
+            return None
+        return int(max(0, remaining_s * 1000))
+
+    def reschedule(self, name: str, delay_ms: int, message: object) -> TimerRef:
+        """Cancel any prior timer registered under `name` for this process and
+        schedule a new one. Idempotent -- calling reschedule("tick", 1000, ...)
+        repeatedly always leaves exactly one pending timer named "tick"."""
+        prior = self._proc_named_timers.get(name)
+        if prior is not None:
+            self.cancel_timer(prior)
+        ref = self.send_after(delay_ms, message)
+        self._proc_named_timers[name] = ref
+        return ref
+
+    def start_interval(
+        self,
+        interval_ms: int,
+        message: object,
+        *,
+        target: "Process | None" = None,
+    ) -> TimerRef:
+        timer_tg = self._require_proc_timer_tg()
+        target = target or self
+        ref = self._next_proc_timer_ref()
+        scope = anyio.CancelScope()
+        interval_s = max(interval_ms, 0) / 1000
+        self._proc_timers[ref._id] = scope
+        self._proc_interval_timers.add(ref._id)
+        self._proc_timer_fire_times[ref._id] = anyio.current_time() + interval_s
+        timer_tg.start_soon(
+            self._run_interval_timer,
+            ref._id,
+            interval_s,
+            message,
+            target,
+            scope,
+        )
+        return ref
+
+    def _teardown_proc_timers(self) -> None:
+        for scope in list(self._proc_timers.values()):
+            scope.cancel()
+        self._proc_timers = {}
+        self._proc_timer_fire_times = {}
+        self._proc_interval_timers = set()
+        self._proc_named_timers = {}
+        self._proc_timer_tg = None
+
     async def _run_init_safe(self, *args, **kwargs) -> bool:
         try:
             await self._init(*args, **kwargs)
@@ -371,9 +575,22 @@ class Process:
         return True
 
     async def loop(self, *args, **kwargs):
-        if not await self._run_init_safe(*args, **kwargs):
-            return
-        await self._loop()
+        try:
+            async with anyio.create_task_group() as tg:
+                self._proc_timer_tg = tg
+                try:
+                    if not await self._run_init_safe(*args, **kwargs):
+                        return
+                    await self._loop()
+                finally:
+                    self._teardown_proc_timers()
+                    tg.cancel_scope.cancel()
+        finally:
+            self._proc_timer_tg = None
+            self._proc_timers = {}
+            self._proc_timer_fire_times = {}
+            self._proc_interval_timers = set()
+            self._proc_named_timers = {}
 
     async def _run_in_process_context[R](
         self,
@@ -390,8 +607,11 @@ class Process:
             current_process.reset(token)
 
     def _set_pending_continue(self, result: t.Any):
-        if isinstance(result, Continue):
-            self._pending_continue = result
+        match result:
+            case Continue() as continuation:
+                self._pending_continue = continuation
+            case Stop(reason=reason):
+                raise Shutdown(reason)
 
     async def _receive_next(self) -> t.Any:
         assert self._mailbox is not None
@@ -404,7 +624,7 @@ class Process:
         reason: t.Any = "normal"
 
         try:
-            async with self._mailbox:
+            async with self._inbox, self._mailbox:
                 logger.debug("%s loop started", self)
                 await self._emit("started")
                 self._started.set()
@@ -412,10 +632,11 @@ class Process:
                     if self._pending_continue is not None:
                         continuation = self._pending_continue
                         self._pending_continue = None
-                        await self._run_in_process_context(
+                        result = await self._run_in_process_context(
                             self.handle_continue,
                             continuation.term,
                         )
+                        self._set_pending_continue(result)
                         continue
 
                     try:
@@ -470,6 +691,7 @@ class Process:
             self._crash_exc = error
             reason = error
         finally:
+            self._teardown_proc_timers()
             # Call user terminate() only when:
             # - not brutal-killed (_skip_terminate=False), AND
             # - trap_exits=True, OR reason is "normal", OR reason is a crash
@@ -496,11 +718,17 @@ class Process:
     async def _dispatch_message(self, message: t.Any) -> None:
         # Reserve runtime control messages even when subclasses consume raw
         # mailbox items by overriding _handle_message directly.
-        match message:
-            case Stop() | Exit() | Down():
-                await Process._handle_message(self, message)
-            case _:
-                await self._handle_message(message)
+        try:
+            match message:
+                case Stop() | Exit() | Down():
+                    await Process._handle_message(self, message)
+                case _:
+                    await self._handle_message(message)
+        finally:
+            if isinstance(message, Message):
+                ack = message.__dict__.pop("_timer_ack", None)
+                if ack is not None:
+                    ack.set()
 
     async def _handle_message(self, message: Message) -> None:
         match message:
